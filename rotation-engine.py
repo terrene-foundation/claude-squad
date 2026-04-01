@@ -173,6 +173,51 @@ def count_account_users(assignments, account):
     return len(get_sessions_for_account(assignments, account))
 
 
+def reconcile_assignment(assignments, session_id):
+    """Check if keychain matches the assigned account. If not (e.g., user did /login),
+    find which account the keychain belongs to and update the assignment.
+    Returns the (possibly updated) account number."""
+    assigned = get_account_for_session(assignments, session_id)
+    kc = read_keychain()
+    if not kc:
+        return assigned
+
+    kc_refresh = kc.get("claudeAiOauth", {}).get("refreshToken", "")
+    if not kc_refresh:
+        return assigned
+
+    # Check if keychain matches the assigned account
+    if assigned:
+        assigned_file = CREDS_DIR / f"{assigned}.json"
+        if assigned_file.exists():
+            try:
+                stored = json.loads(assigned_file.read_text())
+                if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
+                    return assigned  # Match — no reconciliation needed
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Keychain doesn't match assignment — find which account it belongs to
+    for n in map(str, range(1, MAX_ACCOUNTS + 1)):
+        cf = CREDS_DIR / f"{n}.json"
+        if not cf.exists():
+            continue
+        try:
+            stored = json.loads(cf.read_text())
+            if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
+                # Update assignment to match reality
+                if session_id:
+                    assignments.setdefault("sessions", {})[session_id] = {
+                        "account": n,
+                        "assigned_at": time.time(),
+                    }
+                return n
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return assigned
+
+
 def log_rotation(from_acct, to_acct, reason, pid=None):
     entry = {
         "time": time.time(),
@@ -558,8 +603,8 @@ def update_and_maybe_rotate(json_str, claude_pid=None):
         assignments = load_assignments()
         cleanup_stale_sessions(assignments)
 
-        # Determine which account this session is on
-        current = get_account_for_session(assignments, sid)
+        # Reconcile: if user did /login, assignment may be stale
+        current = reconcile_assignment(assignments, sid)
 
         if not current:
             # Auto-claim on first statusline call
@@ -918,8 +963,12 @@ def main():
     elif cmd == "check":
         ppid = _get_ppid_flag()
         pid = get_session_id(claude_pid=ppid)
-        state = load_quota_state()
-        assignments = load_assignments()
+        with StateLock():
+            state = load_quota_state()
+            assignments = load_assignments()
+            # Reconcile: if user did /login, update assignment to match keychain
+            reconcile_assignment(assignments, pid)
+            save_assignments(assignments)
         should, target, reason = check_rotation_for_session(state, assignments, pid)
         result = {"should_rotate": should, "target": target, "reason": reason}
         if should:
@@ -972,6 +1021,12 @@ def main():
         ppid = _get_ppid_flag()
         force = "--force" in sys.argv
         pid = get_session_id(claude_pid=ppid)
+
+        # Reconcile first — if user did /login, update assignment to match keychain
+        with StateLock():
+            assignments = load_assignments()
+            reconcile_assignment(assignments, pid)
+            save_assignments(assignments)
 
         if force and pid:
             # Force: mark current as exhausted and swap immediately, bypassing checks.
