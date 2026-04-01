@@ -1,14 +1,18 @@
 # Claude Squad
 
-Multi-account rotation for Claude Code. Run 15+ terminals across 7 Claude Max accounts with intelligent, automatic quota management.
+Intelligent multi-account rotation for Claude Code. Maximize your throughput by pooling Claude Max subscriptions with automatic, quota-aware switching.
 
-## What it does
+## The problem
 
-- **Auto-rotates** accounts when rate limits hit — no manual intervention
-- **Drains accounts smartly** — uses accounts whose weekly quota expires soonest first
-- **Multi-terminal aware** — 15 terminals coordinate via file locks, no conflicts
-- **Shows quota in statusline** — see usage and reset timers at a glance
-- **Zero-browser switching** — swaps credentials in macOS Keychain, no `/login` needed after setup
+Claude Max subscriptions have rolling rate limits (5-hour and 7-day windows). Heavy users hit these limits regularly, stalling work mid-session. Manually switching accounts with `/login` interrupts flow and requires guessing which account has capacity.
+
+## What Claude Squad does
+
+- **Auto-rotates** when rate limits hit — no manual intervention, no browser
+- **Drains accounts smartly** — prioritizes accounts whose weekly quota expires soonest (use-it-or-lose-it)
+- **Coordinates across terminals** — multiple concurrent sessions share the account pool without conflicts
+- **Shows quota in the statusline** — see usage percentages and reset timers at a glance
+- **One-time setup** — credentials persist for ~1 year after initial login
 
 ## Install
 
@@ -26,40 +30,55 @@ bash install.sh
 
 The installer walks you through logging in to each account (one-time browser auth per account).
 
+### Add accounts later
+
+```bash
+ccc login 3     # Add account to slot 3 (browser login, one-time)
+```
+
 ## How it works
 
-### The priority algorithm
+### Priority algorithm
 
-**Use-it-or-lose-it**: Accounts with weekly quota resetting soonest get drained first.
+**Use-it-or-lose-it**: accounts with weekly quota resetting soonest get drained first.
 
 ```
-Account 1: weekly resets in 1 day  → HIGH PRIORITY (use before it resets)
-Account 2: weekly resets in 5 days → low priority (save for later)
+Account A: weekly resets in 1 day  → HIGH PRIORITY (use before it resets)
+Account B: weekly resets in 5 days → low priority (save for later)
 ```
 
-When an account hits its 5-hour rate limit, it's temporarily "parked". The system switches to the next best account. When the 5-hour window resets, it switches back if that account is still highest priority.
+When an account hits its 5-hour rate limit, it's temporarily parked. The system switches to the next best account. When the 5-hour window resets, it switches back if that account still has the highest priority.
 
 ### Multi-terminal coordination
 
-Each terminal claims an account via a lockfile-coordinated assignment table. The system load-balances — if 3 terminals are on account 1, a new terminal will prefer account 2.
+Each Claude Code session claims an account via a lockfile-coordinated assignment table. The system load-balances — sessions spread across accounts, preferring those with fewer active users.
 
 ### Auto-rotation flow
 
 ```
 Statusline renders (every few seconds)
-  → Updates quota-state.json with current rate_limits
-  → Checks: should this terminal rotate?
+  → Captures rate_limits from Claude Code
+  → Updates shared quota state
+  → Checks: should this session rotate?
   → If yes: swaps Keychain credentials silently
   → Next API call uses the new account
 ```
 
 No user action required. No browser. No `/login`.
 
+### Polling all accounts
+
+```bash
+ccc refresh     # Poll all accounts in parallel to check availability
+```
+
+Each account is queried using its stored refresh token in a sandboxed `claude -p` call. Results update the shared quota state.
+
 ## Usage
 
 ### Inside Claude Code
 
-The system is fully automatic. When you hit a rate limit, it rotates for you.
+Fully automatic. When you hit a rate limit, it rotates for you.
 
 Manual rotation is also available:
 
@@ -71,10 +90,10 @@ Manual rotation is also available:
 
 ```bash
 ccc quota       # Show all accounts with quota, priority, terminal assignments
+ccc refresh     # Poll all accounts for current quota
 ccc swap 3      # Manually switch to account 3
 ccc status      # List configured accounts
 ccc login 4     # Add a new account (browser, one-time)
-ccc extract 4   # Save credentials after login
 ccc help        # Full command list
 ```
 
@@ -82,20 +101,20 @@ ccc help        # Full command list
 
 | File | Location | Purpose |
 |---|---|---|
-| `rotation-engine.py` | `~/.claude/accounts/` | Core rotation logic + quota tracking |
-| `ccc` | `~/.local/bin/` | CLI for account management |
-| `auto-rotate-hook.sh` | `~/.claude/accounts/` | Hook: checks rotation on each message |
-| `statusline-quota.sh` | `~/.claude/accounts/` | Statusline: shows quota + feeds data |
-| `rotate.md` | `~/.claude/commands/` | `/rotate` slash command |
+| `rotation-engine.py` | `~/.claude/accounts/` | Core engine: quota tracking, priority, credential swap |
+| `ccc` | `~/bin/` or `~/.local/bin/` | CLI for account management |
+| `auto-rotate-hook.sh` | `~/.claude/accounts/` | Hook: checks rotation on each user message |
+| `statusline-quota.sh` | `~/.claude/accounts/` | Statusline: displays quota + feeds data to engine |
+| `rotate.md` | `~/.claude/commands/` | `/rotate` slash command for manual trigger |
 
-### Data files (created at runtime)
+### Runtime data
 
 | File | Purpose |
 |---|---|
-| `~/.claude/accounts/credentials/N.json` | OAuth credentials per account (600 perms) |
-| `~/.claude/accounts/quota-state.json` | Real-time quota data from all terminals |
-| `~/.claude/accounts/assignments.json` | Which terminal PID owns which account |
-| `~/.claude/accounts/profiles.json` | Account emails and auth methods |
+| `~/.claude/accounts/credentials/N.json` | OAuth credentials per account (mode 600) |
+| `~/.claude/accounts/quota-state.json` | Real-time quota data from all sessions |
+| `~/.claude/accounts/assignments.json` | Session-to-account mapping |
+| `~/.claude/accounts/profiles.json` | Account emails and metadata |
 | `~/.claude/accounts/rotation-history.jsonl` | Audit log of all rotations |
 
 ## Requirements
@@ -104,23 +123,23 @@ ccc help        # Full command list
 - Claude Code CLI
 - Python 3
 - jq
-- One or more Claude Max subscriptions
+- Two or more Claude Max subscriptions
 
 ## How credentials work
 
-Each account's OAuth credentials (access token + refresh token) are extracted from the macOS Keychain after a one-time browser login. On rotation, the engine writes the target account's credentials back to the Keychain and touches `~/.claude/.credentials.json` to trigger Claude Code's credential cache invalidation.
+Each account's OAuth credentials (access token + refresh token) are extracted from the macOS Keychain after a one-time browser login. The refresh token is long-lived (~1 year) — Claude Code silently renews the access token as needed.
 
-Claude Code automatically refreshes expired access tokens using the stored refresh token. No re-authentication needed.
+On rotation, the engine writes the target account's credentials to the Keychain and touches `~/.claude/.credentials.json` to trigger Claude Code's credential cache invalidation. The next API call seamlessly uses the new account.
 
 ## Uninstall
 
 ```bash
 rm -rf ~/.claude/accounts
-rm ~/.local/bin/ccc
+rm ~/bin/ccc  # or ~/.local/bin/ccc
 rm ~/.claude/commands/rotate.md
 # Remove the UserPromptSubmit hook from ~/.claude/settings.json manually
 ```
 
 ## License
 
-Apache 2.0 — Terrene Foundation
+Apache 2.0 — [Terrene Foundation](https://terrene.foundation)
