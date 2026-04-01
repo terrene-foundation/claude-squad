@@ -241,12 +241,19 @@ def format_time_until(epoch):
     return f"{minutes}m"
 
 
+def _is_data_stale(acct_data, max_age=1800):
+    """Data older than max_age seconds is stale and unreliable."""
+    updated = acct_data.get("updated_at", 0)
+    return updated > 0 and (time.time() - updated) > max_age
+
+
 def pick_best_account(state, assignments, exclude=None):
     """
     Pick the best account considering:
     1. Priority (use-it-or-lose-it)
     2. Availability (not in 5hr cooldown)
     3. Load balancing (prefer accounts with fewer terminals)
+    4. Stale data (>30min old) treated as unknown — don't block rotation on old data
     """
     candidates = []
     for n in map(str, range(1, MAX_ACCOUNTS + 1)):
@@ -256,15 +263,19 @@ def pick_best_account(state, assignments, exclude=None):
             continue
 
         acct_data = state.get("accounts", {}).get(n, {})
+        stale = _is_data_stale(acct_data) if acct_data else False
 
-        # Skip if weekly exhausted (with data)
-        if acct_data and is_weekly_exhausted(acct_data):
+        # Skip if weekly exhausted (only trust fresh data)
+        if acct_data and not stale and is_weekly_exhausted(acct_data):
             continue
-        # Skip if 5hr cooling (with data)
-        if acct_data and not is_available(acct_data):
+        # Skip if 5hr cooling (only trust fresh data)
+        if acct_data and not stale and not is_available(acct_data):
             continue
 
-        priority = calculate_priority(acct_data) if acct_data else 500  # Unknown = mid priority
+        if not acct_data or stale:
+            priority = 500  # Unknown/stale = mid priority, worth trying
+        else:
+            priority = calculate_priority(acct_data)
         terminal_count = count_account_users(assignments, n)
 
         # Penalize accounts with many terminals already on them
@@ -295,6 +306,15 @@ def check_rotation_for_session(state, assignments, session_id):
         return False, None, ""
 
     current_priority = calculate_priority(current_data)
+    hourly_used = current_data.get("five_hour", {}).get("used_percentage", 0)
+
+    # Trigger 0: Proactive rotation at 95% — don't wait until rate-limited
+    # Once Claude Code says "You've hit your limit", it can't process /rotate.
+    # Rotating early ensures seamless continuation.
+    if hourly_used >= 95 and not is_weekly_exhausted(current_data):
+        target = pick_best_account(state, assignments, exclude=current)
+        if target:
+            return True, target, f"proactive rotation ({hourly_used:.0f}% used)"
 
     # Trigger 1: 5hr exhausted
     if not is_available(current_data) and not is_weekly_exhausted(current_data):
@@ -388,6 +408,17 @@ def extract_current(account_num):
         "email": email, "method": "oauth",
     }
     save_json(PROFILES_FILE, profiles)
+
+    # Reset quota data — fresh login means fresh quota
+    with StateLock():
+        state = load_quota_state()
+        state.setdefault("accounts", {})[str(account_num)] = {
+            "five_hour": {"used_percentage": 0, "resets_at": 0},
+            "seven_day": {"used_percentage": 0, "resets_at": 0},
+            "updated_at": time.time(),
+        }
+        save_quota_state(state)
+
     print(f"Extracted credentials for account {account_num} ({email})")
     return True
 
