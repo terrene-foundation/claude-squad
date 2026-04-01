@@ -1092,6 +1092,57 @@ def main():
                 else:
                     sys.exit(1)
 
+    elif cmd == "adopt-keychain":
+        # Hook-only: read keychain and update THIS terminal's assignment to match.
+        # Safe because the hook runs for ONE terminal only (not statusline).
+        # This respects manual /login without cross-contaminating other terminals.
+        ppid = _get_ppid_flag()
+        pid = get_session_id(claude_pid=ppid)
+        if not pid:
+            sys.exit(0)
+
+        kc = read_keychain()
+        if not kc:
+            sys.exit(0)
+        kc_refresh = kc.get("claudeAiOauth", {}).get("refreshToken", "")
+        if not kc_refresh:
+            sys.exit(0)
+
+        with StateLock():
+            assignments = load_assignments()
+            assigned = get_account_for_session(assignments, pid)
+
+            # Check if keychain matches current assignment
+            if assigned:
+                af = CREDS_DIR / f"{assigned}.json"
+                if af.exists():
+                    try:
+                        stored = json.loads(af.read_text())
+                        if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
+                            sys.exit(0)  # Already correct
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+            # Keychain doesn't match — find which account it is
+            for n in map(str, range(1, MAX_ACCOUNTS + 1)):
+                cf = CREDS_DIR / f"{n}.json"
+                if not cf.exists():
+                    continue
+                try:
+                    stored = json.loads(cf.read_text())
+                    if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
+                        assignments.setdefault("sessions", {})[pid] = {
+                            "account": n,
+                            "assigned_at": time.time(),
+                        }
+                        save_assignments(assignments)
+                        profiles = load_profiles()
+                        email = profiles.get("accounts", {}).get(n, {}).get("email", "")
+                        print(f"adopted account {n} ({email})")
+                        break
+                except (json.JSONDecodeError, OSError):
+                    continue
+
     elif cmd == "verify":
         verify_credentials()
 
