@@ -517,6 +517,20 @@ def update_and_maybe_rotate(json_str):
         }
         save_quota_state(state)
 
+    # Keep stored credentials fresh (refresh tokens rotate)
+    # Run outside lock, non-blocking
+    cred_file = CREDS_DIR / f"{current}.json"
+    if cred_file.exists():
+        try:
+            current_creds = read_keychain()
+            if current_creds:
+                cred_file.write_text(json.dumps(current_creds, indent=2))
+                cred_file.chmod(0o600)
+        except Exception:
+            pass
+
+    with StateLock():
+
         # Check if THIS session should rotate
         should, target, reason = check_rotation_for_session(state, assignments, sid)
 
@@ -658,14 +672,24 @@ def refresh_account_quota(account_num):
         if not token:
             return account_num, None
 
-        # Sandboxed: CLAUDE_CODE_OAUTH_TOKEN bypasses keychain
+        refresh_token = creds.get("claudeAiOauth", {}).get("refreshToken", "")
+        scopes = creds.get("claudeAiOauth", {}).get("scopes", [])
+
+        # Sandboxed: pass refresh token so the sandboxed CC can authenticate
         # --bare: no hooks, no CLAUDE.md, no auto-memory
         # -p ".": single-shot, 1 token, exits immediately
         env = os.environ.copy()
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        # Use refresh token (1-year lifetime); CC exchanges it for a fresh access token
+        # Cannot use --bare (skips OAuth). Use --system-prompt to minimize output.
+        if refresh_token:
+            env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = refresh_token
+            env["CLAUDE_CODE_OAUTH_SCOPES"] = ",".join(scopes) if scopes else "user:inference"
+        else:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
 
         result = subprocess.run(
-            ["claude", "-p", ".", "--bare", "--output-format", "json"],
+            ["claude", "-p", "x", "--system-prompt", "Reply x",
+             "--output-format", "json"],
             capture_output=True, text=True, timeout=30, env=env
         )
 
