@@ -276,6 +276,133 @@ def update_quota(json_str):
                 email = get_email(target)
                 print(f"[auto-rotate] → account {target} ({email})", file=sys.stderr)
 
+    # Background poll: refresh other accounts every 5 minutes
+    # so we know where to rotate BEFORE we need to
+    _maybe_poll_others(state, current)
+
+
+POLL_INTERVAL = 300  # 5 minutes
+POLL_LOCK = ACCOUNTS_DIR / ".poll_lock"
+POLL_STAMP = ACCOUNTS_DIR / ".last_poll"
+
+
+def _maybe_poll_others(state, current):
+    """Poll other accounts in background if last poll was >5min ago.
+    Uses a lock file so only one terminal triggers the poll."""
+    try:
+        last = float(POLL_STAMP.read_text().strip())
+        if time.time() - last < POLL_INTERVAL:
+            return  # Too recent
+    except (FileNotFoundError, ValueError):
+        pass
+
+    # Try to acquire poll lock (non-blocking)
+    try:
+        fd = open(POLL_LOCK, "w")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        return  # Another terminal is already polling
+
+    # Won the race — update timestamp and spawn background poll
+    POLL_STAMP.write_text(str(time.time()))
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    fd.close()
+
+    # Poll in background — don't block the statusline
+    others = [n for n in map(str, range(1, MAX_ACCOUNTS + 1))
+              if n != current and (CREDS_DIR / f"{n}.json").exists()]
+    if not others:
+        return
+
+    # Spawn detached process to poll each account
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "_poll_others"] + others,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _poll_account(n):
+    """Poll one account using its refresh token. Returns (n, data)."""
+    cf = CREDS_DIR / f"{n}.json"
+    if not cf.exists():
+        return n, None
+    try:
+        creds = json.loads(cf.read_text())
+        rt = creds.get("claudeAiOauth", {}).get("refreshToken", "")
+        if not rt:
+            return n, None
+        env = os.environ.copy()
+        env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = rt
+        env["CLAUDE_CODE_OAUTH_SCOPES"] = "user:inference"
+        r = subprocess.run(
+            ["claude", "-p", "x", "--system-prompt", "Reply x", "--output-format", "json"],
+            capture_output=True, text=True, timeout=30, env=env)
+        if r.returncode == 0:
+            try:
+                output = json.loads(r.stdout)
+                if isinstance(output, list):
+                    info = {}
+                    for item in output:
+                        if item.get("type") == "rate_limit_event":
+                            rli = item.get("rate_limit_info", {})
+                            rtype = rli.get("rateLimitType", "")
+                            resets = rli.get("resetsAt", 0)
+                            status = rli.get("status", "")
+                            if rtype in ("five_hour", "seven_day"):
+                                info[rtype] = {
+                                    "used_percentage": 100 if status == "rejected" else 0,
+                                    "resets_at": resets,
+                                }
+                    if info:
+                        return n, info
+                return n, {"available": True}
+            except json.JSONDecodeError:
+                pass
+            return n, {"available": True}
+        stderr = r.stderr.lower()
+        if "rate" in stderr or "limit" in stderr:
+            return n, {"rate_limited": True}
+        if "401" in r.stderr or "auth" in stderr:
+            return n, {"expired": True}
+        return n, None
+    except Exception:
+        return n, None
+
+
+def _run_poll_others(accounts):
+    """Background process: poll accounts in parallel, update state."""
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(accounts), 7)) as ex:
+        results = dict(ex.map(lambda n: _poll_account(n), accounts))
+
+    with Lock():
+        state = load_state()
+        for n, data in results.items():
+            if data is None or data.get("expired"):
+                continue
+            existing = state.get("accounts", {}).get(n, {})
+            if data.get("five_hour") or data.get("seven_day"):
+                state.setdefault("accounts", {})[n] = {
+                    "five_hour": data.get("five_hour", existing.get("five_hour", {})),
+                    "seven_day": data.get("seven_day", existing.get("seven_day", {})),
+                    "updated_at": time.time(),
+                }
+            elif data.get("rate_limited"):
+                state.setdefault("accounts", {})[n] = {
+                    "five_hour": {"used_percentage": 100,
+                                  "resets_at": existing.get("five_hour", {}).get("resets_at", 0)},
+                    "seven_day": existing.get("seven_day", {}),
+                    "updated_at": time.time(),
+                }
+            elif data.get("available") and not existing:
+                state.setdefault("accounts", {})[n] = {
+                    "five_hour": {"used_percentage": 0, "resets_at": 0},
+                    "seven_day": {"used_percentage": 0, "resets_at": 0},
+                    "updated_at": time.time(),
+                }
+        save_state(state)
+
 
 def _detect_current_account():
     """One-time: figure out which account the keychain currently holds."""
@@ -547,6 +674,11 @@ def main():
         verify_credentials()
     elif cmd == "refresh":
         refresh_all()
+    elif cmd == "_poll_others":
+        # Internal: called as background process by statusline
+        accounts = sys.argv[2:]
+        if accounts:
+            _run_poll_others(accounts)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr); sys.exit(1)
 
