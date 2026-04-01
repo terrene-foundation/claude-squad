@@ -173,49 +173,48 @@ def count_account_users(assignments, account):
     return len(get_sessions_for_account(assignments, account))
 
 
+LOGIN_FLAG_DIR = ACCOUNTS_DIR / ".login_flags"
+
+
 def reconcile_assignment(assignments, session_id):
-    """Check if keychain matches the assigned account. If not (e.g., user did /login),
-    find which account the keychain belongs to and update the assignment.
+    """Check if this terminal just did /login (explicit signal via flag file).
+    NEVER reads the shared keychain — that causes cross-terminal contamination
+    because all 15 terminals share one keychain entry.
     Returns the (possibly updated) account number."""
     assigned = get_account_for_session(assignments, session_id)
-    kc = read_keychain()
-    if not kc:
+
+    # Only reconcile if this terminal explicitly flagged a login
+    if not session_id:
+        return assigned
+    flag_file = LOGIN_FLAG_DIR / f"{session_id}"
+    if not flag_file.exists():
         return assigned
 
-    kc_refresh = kc.get("claudeAiOauth", {}).get("refreshToken", "")
-    if not kc_refresh:
+    # Read and consume the flag
+    try:
+        new_account = flag_file.read_text().strip()
+        flag_file.unlink()
+    except (FileNotFoundError, OSError):
         return assigned
 
-    # Check if keychain matches the assigned account
-    if assigned:
-        assigned_file = CREDS_DIR / f"{assigned}.json"
-        if assigned_file.exists():
-            try:
-                stored = json.loads(assigned_file.read_text())
-                if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
-                    return assigned  # Match — no reconciliation needed
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    # Keychain doesn't match assignment — find which account it belongs to
-    for n in map(str, range(1, MAX_ACCOUNTS + 1)):
-        cf = CREDS_DIR / f"{n}.json"
-        if not cf.exists():
-            continue
-        try:
-            stored = json.loads(cf.read_text())
-            if stored.get("claudeAiOauth", {}).get("refreshToken", "") == kc_refresh:
-                # Update assignment to match reality
-                if session_id:
-                    assignments.setdefault("sessions", {})[session_id] = {
-                        "account": n,
-                        "assigned_at": time.time(),
-                    }
-                return n
-        except (json.JSONDecodeError, OSError):
-            continue
+    if new_account and new_account != assigned:
+        assignments.setdefault("sessions", {})[session_id] = {
+            "account": new_account,
+            "assigned_at": time.time(),
+        }
+        return new_account
 
     return assigned
+
+
+def signal_login(account_num, session_id=None):
+    """Signal that this terminal just did /login. Creates a flag file
+    that reconcile_assignment will pick up on the next check/update cycle."""
+    sid = session_id or get_session_id()
+    if not sid:
+        return
+    LOGIN_FLAG_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGIN_FLAG_DIR / f"{sid}").write_text(str(account_num))
 
 
 def log_rotation(from_acct, to_acct, reason, pid=None):
@@ -464,52 +463,58 @@ def extract_current(account_num):
         }
         save_quota_state(state)
 
+    # Signal all sessions that this account was just logged in
+    # (any session currently assigned to this account should reconcile)
+    signal_login(account_num)
+
     print(f"Extracted credentials for account {account_num} ({email})")
     return True
 
 
 def swap_to(account_num, session_id=None):
-    """Swap keychain to account N. Updates assignment for session."""
+    """Swap keychain to account N. Updates assignment for session.
+    Fully locked to prevent concurrent swap races (CRITICAL-3 from red team)."""
     cred_file = CREDS_DIR / f"{account_num}.json"
     if not cred_file.exists():
         print(f"error: no credentials for account {account_num}", file=sys.stderr)
         return False
 
-    # Save current keychain credentials back to the CORRECT file.
-    # Identify by matching refresh tokens, NOT session assignment — prevents cross-contamination.
-    current_creds = read_keychain()
-    if current_creds:
-        kc_refresh = current_creds.get("claudeAiOauth", {}).get("refreshToken", "")
-        if kc_refresh:
-            for n in map(str, range(1, MAX_ACCOUNTS + 1)):
-                if n == str(account_num):
-                    continue  # Don't overwrite target before loading it
-                cf = CREDS_DIR / f"{n}.json"
-                if not cf.exists():
-                    continue
-                try:
-                    stored = json.loads(cf.read_text())
-                    stored_refresh = stored.get("claudeAiOauth", {}).get("refreshToken", "")
-                    if stored_refresh == kc_refresh:
-                        cf.write_text(json.dumps(current_creds, indent=2))
-                        cf.chmod(0o600)
-                        break
-                except (json.JSONDecodeError, OSError):
-                    continue
+    with StateLock():
+        # Save current keychain credentials back to the CORRECT file.
+        # Match by refresh token, NOT session assignment — prevents cross-contamination.
+        current_creds = read_keychain()
+        if current_creds:
+            kc_refresh = current_creds.get("claudeAiOauth", {}).get("refreshToken", "")
+            if kc_refresh:
+                for n in map(str, range(1, MAX_ACCOUNTS + 1)):
+                    if n == str(account_num):
+                        continue  # Don't overwrite target before loading it
+                    cf = CREDS_DIR / f"{n}.json"
+                    if not cf.exists():
+                        continue
+                    try:
+                        stored = json.loads(cf.read_text())
+                        stored_refresh = stored.get("claudeAiOauth", {}).get("refreshToken", "")
+                        if stored_refresh == kc_refresh:
+                            cf.write_text(json.dumps(current_creds, indent=2))
+                            cf.chmod(0o600)
+                            break
+                    except (json.JSONDecodeError, OSError):
+                        continue
 
-    creds = json.loads(cred_file.read_text())
-    if not write_keychain(creds):
-        return False
+        creds = json.loads(cred_file.read_text())
+        if not write_keychain(creds):
+            return False
 
-    # Update assignment if we have a session
-    sid = session_id or get_session_id()
-    if sid:
-        assignments = load_assignments()
-        assignments.setdefault("sessions", {})[sid] = {
-            "account": str(account_num),
-            "assigned_at": time.time(),
-        }
-        save_assignments(assignments)
+        # Update assignment inside the same lock
+        sid = session_id or get_session_id()
+        if sid:
+            assignments = load_assignments()
+            assignments.setdefault("sessions", {})[sid] = {
+                "account": str(account_num),
+                "assigned_at": time.time(),
+            }
+            save_assignments(assignments)
 
     # Also update .current for non-session callers (ccc swap)
     CURRENT_FILE.write_text(str(account_num))
