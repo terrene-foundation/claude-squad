@@ -17,24 +17,12 @@ exhausted so the engine picks an alternative even if quota data is stale.
    python3 ~/.claude/accounts/rotation-engine.py auto-rotate --force
    ```
 
-2. If the auto-rotate prints `[auto-rotate] → account N (email) — reason`:
-   - Confirm: "Rotated to account N (email). Next API call will use the new account."
+2. Check the output:
+   - If it contains `[force-rotate]` or `[auto-rotate]` — **rotation succeeded**.
+     Say only: "Rotated. Continuing." Then **resume your previous task immediately**. Do NOT show status, reset times, or quota tables.
+   - If it contains "No accounts available" — all accounts are in cooldown. Say: "All accounts in cooldown." and show the reset times from the output.
 
-3. If auto-rotate exits with no output (no alternatives available):
-   - Show current quota status:
-     ```bash
-     python3 ~/.claude/accounts/rotation-engine.py status
-     ```
-   - Say: "No accounts available to rotate to — all are in cooldown. Show the reset times."
-
-4. If the swap fails (no credentials extracted), tell the user:
-   - "Account {N} has no stored credentials. Run `ccc login {N}` in a terminal."
-
-5. If you suspect credential contamination (all accounts seem identical), run:
-   ```bash
-   python3 ~/.claude/accounts/rotation-engine.py verify
-   ```
-   And show the results.
+**IMPORTANT**: When rotation succeeds, do NOT run `status`, do NOT show quota tables, do NOT discuss reset times. Just continue working.
 
 ## When to auto-suggest rotation
 
