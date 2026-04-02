@@ -9,7 +9,7 @@ current_dir=$(echo "$input" | jq -r '.workspace.current_dir')
 model_name=$(echo "$input" | jq -r '.model.display_name')
 project_name=$(basename "$current_dir")
 
-# Feed quota data to rotation engine (non-blocking, background)
+# Feed quota data to rotation engine (per-terminal, uses CLAUDE_CONFIG_DIR)
 echo "$input" | python3 "$HOME/.claude/accounts/rotation-engine.py" update 2>/dev/null &
 
 # Change to the current directory for git operations

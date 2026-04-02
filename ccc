@@ -82,20 +82,26 @@ launch_account() {
   local n="$1"
   shift
 
-  local settings_file="$ACCOUNTS_DIR/${n}.json"
-  local config_dir="$ACCOUNTS_DIR/${n}"
+  # Primary: per-account config dir (CLAUDE_CONFIG_DIR isolation)
+  local rotation_config_dir="$ACCOUNTS_DIR/config-${n}"
+  if [[ -d "$rotation_config_dir" ]] && [[ -f "$rotation_config_dir/.credentials.json" ]]; then
+    export CLAUDE_CONFIG_DIR="$rotation_config_dir"
+    exec claude "$@"
+  fi
 
-  # Method 1: Settings overlay (has auth token or API key in env)
+  # Fallback: settings overlay
+  local settings_file="$ACCOUNTS_DIR/${n}.json"
   if [[ -f "$settings_file" ]]; then
     launch_with_settings "$settings_file" "$@"
   fi
 
-  # Method 2: Isolated config dir (OAuth)
+  # Fallback: old-style config dir
+  local config_dir="$ACCOUNTS_DIR/${n}"
   if [[ -d "$config_dir" ]]; then
     launch_with_config_dir "$config_dir" "$@"
   fi
 
-  die "account $n not configured. Run: ccc add $n"
+  die "account $n not configured. Run: ccc login $n && ccc setup"
 }
 
 # ─── Commands ──────────────────────────────────────────────
@@ -172,13 +178,15 @@ cmd_login() {
   # Update profile
   _update_profile "$n" "$email" "oauth"
 
-  # Extract keychain credentials (refresh token is long-lived ~1 year)
+  # Extract keychain credentials to credentials/N.json
   python3 "$HOME/.claude/accounts/rotation-engine.py" extract "$n" 2>/dev/null
-  # Fix email (extract may pick up wrong email from session)
   _update_profile "$n" "$email" "oauth"
 
+  # Update config dir with fresh credentials
+  python3 "$HOME/.claude/accounts/rotation-engine.py" setup 2>/dev/null
+
   echo ""
-  echo "Account $n ($email) configured."
+  echo "Account $n ($email) configured. Launch with: ccc $n"
 }
 
 cmd_add() {
@@ -384,6 +392,10 @@ except: print('account $n')
       ;;
     verify)
       python3 "$HOME/.claude/accounts/rotation-engine.py" verify
+      ;;
+    setup)
+      echo "Setting up per-account config dirs..."
+      python3 "$HOME/.claude/accounts/rotation-engine.py" setup
       ;;
     quota)
       python3 "$HOME/.claude/accounts/rotation-engine.py" status
