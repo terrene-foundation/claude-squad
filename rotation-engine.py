@@ -106,16 +106,45 @@ def log_rotation(from_acct, to_acct, reason):
 
 # ─── This Terminal ───────────────────────────────────────
 
+CURRENT_ACCOUNT_FILE = ACCOUNTS_DIR / ".current_accounts"
+
+
 def this_account():
-    """Which account is THIS terminal on? Derived from CLAUDE_CONFIG_DIR."""
+    """Which account is THIS terminal on?
+    After mid-session swap, the config dir name no longer matches the account.
+    Use a per-PID tracking file instead."""
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
     if not config_dir:
         return None
-    # Extract account number from path: .../config-N/
+
+    pid = str(os.getpid())
+    ppid = str(os.getppid())
+
+    # Check per-process tracking first (survives mid-session swaps)
+    data = _load(CURRENT_ACCOUNT_FILE, {})
+    # Check PPID (Claude Code PID) then own PID
+    for check_pid in (ppid, pid):
+        if check_pid in data:
+            return data[check_pid]
+
+    # Fallback: derive from config dir name (initial launch)
     name = Path(config_dir).name
     if name.startswith("config-") and name[7:].isdigit():
         return name[7:]
     return None
+
+
+def set_this_account(account_num):
+    """Track which account this terminal is actually on (after swap)."""
+    pid = str(os.getpid())
+    ppid = str(os.getppid())
+    with Lock():
+        data = _load(CURRENT_ACCOUNT_FILE, {})
+        data[pid] = str(account_num)
+        data[ppid] = str(account_num)
+        # Cleanup: remove entries older than 24h would require timestamps,
+        # keep it simple — file stays small with ~20 entries max
+        _save(CURRENT_ACCOUNT_FILE, data)
 
 def this_config_dir():
     """Path to this terminal's config dir."""
@@ -230,6 +259,9 @@ def swap_to(target_account):
         target_path = Path(config_dir) / ".credentials.json"
         target_path.write_text(json.dumps(creds))
         target_path.chmod(0o600)
+
+    # Track the actual account this terminal is on (survives mid-session swaps)
+    set_this_account(target_account)
 
     email = get_email(target_account)
     print(f"Swapped to account {target_account} ({email})")
@@ -534,7 +566,8 @@ def main():
         auto_rotate(force="--force" in sys.argv)
     elif cmd == "check":
         current = this_account()
-        state = load_state()
+        with Lock():
+            state = load_state()
         if not current:
             print(json.dumps({"should_rotate": False, "reason": "no config dir"})); sys.exit(0)
         acct = state.get("accounts", {}).get(current, {})
