@@ -12,7 +12,7 @@ exhausted so the engine picks an alternative even if quota data is stale.
 
 ## Steps
 
-1. Run the rotation engine with `--force` (the user is asking because they're rate-limited):
+1. Run the rotation engine with `--force`:
    ```bash
    python3 ~/.claude/accounts/rotation-engine.py auto-rotate --force
    ```
@@ -21,6 +21,7 @@ exhausted so the engine picks an alternative even if quota data is stale.
    - If it contains `[force-rotate]` or `[auto-rotate]` — **rotation succeeded**.
      Say only: "Rotated. Continuing." Then **resume your previous task immediately**. Do NOT show status, reset times, or quota tables.
    - If it contains "No accounts available" — all accounts are in cooldown. Say: "All accounts in cooldown." and show the reset times from the output.
+   - If it contains "CLAUDE_CONFIG_DIR not set" — this terminal wasn't launched via `ccc`. Tell the user: "This terminal needs to be launched with `ccc <N>` for rotation to work."
 
 **IMPORTANT**: When rotation succeeds, do NOT run `status`, do NOT show quota tables, do NOT discuss reset times. Just continue working.
 
