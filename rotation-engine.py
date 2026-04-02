@@ -138,6 +138,10 @@ def this_account():
 
     # Check per-process tracking first (survives mid-session swaps)
     data = _load(CURRENT_ACCOUNT_FILE, {})
+    old_len = len(data)
+    _cleanup_dead_pids(data)
+    if len(data) < old_len:
+        _save(CURRENT_ACCOUNT_FILE, data)
     # Check PPID (Claude Code PID) then own PID
     for check_pid in (ppid, pid):
         if check_pid in data:
@@ -158,9 +162,23 @@ def set_this_account(account_num):
         data = _load(CURRENT_ACCOUNT_FILE, {})
         data[pid] = str(account_num)
         data[ppid] = str(account_num)
-        # Cleanup: remove entries older than 24h would require timestamps,
-        # keep it simple — file stays small with ~20 entries max
+        # Cleanup dead PIDs — keep file small
+        _cleanup_dead_pids(data)
         _save(CURRENT_ACCOUNT_FILE, data)
+
+
+def _cleanup_dead_pids(data):
+    """Remove entries for PIDs that no longer exist."""
+    dead = []
+    for pid_str in data:
+        try:
+            os.kill(int(pid_str), 0)  # Check if process exists
+        except (ProcessLookupError, ValueError):
+            dead.append(pid_str)
+        except PermissionError:
+            pass  # Process exists but we can't signal it
+    for pid_str in dead:
+        del data[pid_str]
 
 def this_config_dir():
     """Path to this terminal's config dir."""
@@ -174,7 +192,6 @@ def config_dir_for(n):
 
 def setup_config_dirs():
     """Create/update config dirs for all accounts with credentials."""
-    profiles = load_profiles()
     for n in map(str, range(1, MAX_ACCOUNTS + 1)):
         cred_file = CREDS_DIR / f"{n}.json"
         if not cred_file.exists():
@@ -303,9 +320,9 @@ def extract_current(account_num):
         try: email = json.loads(r.stdout).get("email", "unknown")
         except json.JSONDecodeError: pass
 
-    profiles = load_profiles()
-    profiles.setdefault("accounts", {})[str(account_num)] = {"email": email, "method": "oauth"}
-    _save(PROFILES_FILE, profiles)
+    p = load_profiles()
+    p.setdefault("accounts", {})[str(account_num)] = {"email": email, "method": "oauth"}
+    _save(PROFILES_FILE, p)
 
     # Reset quota
     with Lock():
@@ -421,10 +438,13 @@ def _run_poll_others(accounts):
                     "seven_day": existing.get("seven_day", {}),
                     "updated_at": time.time(),
                 }
-            elif isinstance(data, dict) and data.get("available") and not existing:
+            elif isinstance(data, dict) and data.get("available"):
+                # Poll succeeded without rate_limit_event = account has quota.
+                # Record as low usage so pick_best treats it as a viable target.
+                # Preserve existing reset times if we have them.
                 state.setdefault("accounts", {})[n] = {
-                    "five_hour": {"used_percentage": 0, "resets_at": 0},
-                    "seven_day": {"used_percentage": 0, "resets_at": 0},
+                    "five_hour": existing.get("five_hour", {"used_percentage": 0, "resets_at": 0}),
+                    "seven_day": existing.get("seven_day", {"used_percentage": 0, "resets_at": 0}),
                     "updated_at": time.time(),
                 }
         save_state(state)
@@ -529,7 +549,6 @@ def statusline_str():
 
 def verify_credentials():
     import hashlib
-    profiles = load_profiles()
     hashes = {}
     for n in map(str, range(1, MAX_ACCOUNTS + 1)):
         cf = CREDS_DIR / f"{n}.json"
@@ -599,7 +618,8 @@ def refresh_all():
             elif data.get("rate_limited"): print(f"  {n}  ◌ {email} — rate limited")
             elif data.get("available"): print(f"  {n}  ● {email} — available")
             else:
-                fp = data.get("five_hour", {}).get("used_percentage", "?")
+                fh = data.get("five_hour")
+                fp = fh.get("used_percentage", "?") if isinstance(fh, dict) else "?"
                 print(f"  {n}  ● {email} — 5h:{fp}%")
     with Lock():
         state = load_state()
@@ -619,10 +639,10 @@ def refresh_all():
                     "seven_day": existing.get("seven_day", {}),
                     "updated_at": time.time(),
                 }
-            elif data.get("available") and not existing:
+            elif data.get("available"):
                 state.setdefault("accounts", {})[n] = {
-                    "five_hour": {"used_percentage": 0, "resets_at": 0},
-                    "seven_day": {"used_percentage": 0, "resets_at": 0},
+                    "five_hour": existing.get("five_hour", {"used_percentage": 0, "resets_at": 0}),
+                    "seven_day": existing.get("seven_day", {"used_percentage": 0, "resets_at": 0}),
                     "updated_at": time.time(),
                 }
         save_state(state)
