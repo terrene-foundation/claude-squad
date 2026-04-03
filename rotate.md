@@ -5,26 +5,18 @@ description: "Intelligent account rotation — auto-pick best Claude account bas
 
 # /rotate — Account Rotation
 
-When the user runs /rotate, perform intelligent account rotation.
-
-The user calls this when they're rate-limited. The `--force` flag marks the current account as
-exhausted so the engine picks an alternative even if quota data is stale.
+When the user runs /rotate, force-rotate to the best available account.
 
 ## Steps
 
-1. Run the rotation engine with `--force`:
+1. Run:
+
    ```bash
    python3 ~/.claude/accounts/rotation-engine.py auto-rotate --force
    ```
 
-2. Check the output:
-   - If it contains `[force-rotate]` or `[auto-rotate]` — **rotation succeeded**.
-     Say only: "Rotated. Continuing." Then **resume your previous task immediately**. Do NOT show status, reset times, or quota tables.
-   - If it contains "No accounts available" — all accounts are in cooldown. Say: "All accounts in cooldown." and show the reset times from the output.
-   - If it contains "CLAUDE_CONFIG_DIR not set" — this terminal wasn't launched via `ccc`. Tell the user: "This terminal needs to be launched with `ccc <N>` for rotation to work."
+2. If output contains `[auto-rotate]` — rotation succeeded. Say "Rotated." and resume your previous task.
+3. If output contains "All accounts exhausted" — say so and show the reset times.
+4. If output contains "CLAUDE_CONFIG_DIR not set" — tell the user to launch with `cc <N>`.
 
-**IMPORTANT**: When rotation succeeds, do NOT run `status`, do NOT show quota tables, do NOT discuss reset times. Just continue working.
-
-## When to auto-suggest rotation
-
-If you notice a rate limit error in the conversation (429, "rate limited", "usage limit"), proactively suggest: "You've hit a rate limit. Run /rotate to switch accounts."
+**IMPORTANT**: On success, do NOT show status tables or quota details. Just continue working.
