@@ -214,36 +214,14 @@ cmd_login() {
   # Update profile
   _update_profile "$n" "$email" "oauth"
 
-  # Extract credentials to credentials/N.json and config dir .credentials.json
-  # Modern Claude Code writes to macOS keychain (shared, single entry).
-  # We MUST extract immediately after login before the next login overwrites it.
+  # Copy credentials to credentials/N.json for rotation pool
+  # claude auth login writes .credentials.json into the config dir
   mkdir -p "$ACCOUNTS_DIR/credentials"
-  local keychain_cred
-  # Claude Code stores credentials per config dir: Claude Code-credentials-{sha256(dir)[:8]}
-  local keychain_suffix
-  keychain_suffix=$(echo -n "$config_dir" | shasum -a 256 | cut -c1-8)
-  local keychain_service="Claude Code-credentials-${keychain_suffix}"
-  keychain_cred=$(security find-generic-password -s "$keychain_service" -w 2>/dev/null || true)
-  # Fallback to generic service name (older Claude Code versions, hex-encoded)
-  if [[ -z "$keychain_cred" ]]; then
-    local keychain_hex
-    keychain_hex=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
-    if [[ -n "$keychain_hex" ]]; then
-      keychain_cred=$(echo "$keychain_hex" | xxd -r -p)
-    fi
-  fi
-  if [[ -n "$keychain_cred" ]]; then
-    echo "$keychain_cred" > "$ACCOUNTS_DIR/credentials/${n}.json"
-    chmod 600 "$ACCOUNTS_DIR/credentials/${n}.json"
-    # Also write to config dir so Claude Code can use it without keychain
-    echo "$keychain_cred" > "$config_dir/.credentials.json"
-    chmod 600 "$config_dir/.credentials.json"
-  elif [[ -f "$config_dir/.credentials.json" ]]; then
-    # Fallback: credential file written by older Claude Code
+  if [[ -f "$config_dir/.credentials.json" ]]; then
     cp "$config_dir/.credentials.json" "$ACCOUNTS_DIR/credentials/${n}.json"
     chmod 600 "$ACCOUNTS_DIR/credentials/${n}.json"
   else
-    echo "error: no credentials found after login for account $n" >&2
+    echo "warning: no .credentials.json after login — try 'ccc extract $n'" >&2
   fi
 
   # Patch config dir with onboarding state from ~/.claude.json
@@ -573,16 +551,15 @@ MANAGEMENT:
   ccc names            List saved session names for current dir
   ccc add <N> [email]  Add/configure account N (1-7 or mm)
   ccc login <N>        OAuth login for account N (1-7)
-  ccc extract <N>      Save current keychain creds as account N
-  ccc swap <N>         Swap keychain to account N (no browser)
+  ccc extract <N>      Save current config dir creds as account N
+  ccc swap <N>         Swap to account N mid-session (no browser)
   ccc verify           Check for credential cross-contamination
   ccc help             This message
 
 SETUP (one-time per account):
-  1. ccc login 1              OAuth login via browser
-  2. ccc extract 1            Save credentials to rotation pool
-  3. Repeat for accounts 2-7
-  4. ccc swap 2               Test: switch to account 2 (no browser)
+  1. ccc login 1              OAuth login via browser (saves creds automatically)
+  2. Repeat for accounts 2-7
+  3. ccc swap 2               Test: switch to account 2 (no browser)
 
 IN-SESSION (use /rotate command):
   /rotate                     Auto-pick best account and swap

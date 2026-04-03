@@ -52,7 +52,7 @@ if ! command -v jq &>/dev/null; then
 fi
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    err "macOS required (uses macOS Keychain for credential storage)."
+    err "macOS required (uses macOS security for credential storage)."
     exit 1
 fi
 

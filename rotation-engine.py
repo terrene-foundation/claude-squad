@@ -44,7 +44,6 @@ PROFILES_FILE = ACCOUNTS_DIR / "profiles.json"
 BLOCKED_FILE = ACCOUNTS_DIR / "blocked.json"
 LOG_FILE = ACCOUNTS_DIR / "rotation.log"
 LOCK_FILE = ACCOUNTS_DIR / ".lock"
-KEYCHAIN_SERVICE = "Claude Code-credentials"
 MAX_ACCOUNTS = 7
 GLOBAL_CLAUDE_DIR = Path.home() / ".claude"
 ROTATION_COOLDOWN = 30  # seconds — debounce rapid-fire rotations
@@ -302,23 +301,6 @@ def setup_config_dirs():
     print("\nConfig dirs ready. Launch terminals with: ccc <N>")
 
 
-# ─── Keychain (legacy, for extract only) ─────────────────
-
-
-def read_keychain():
-    r = subprocess.run(
-        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        return None
-    try:
-        return json.loads(r.stdout.strip())
-    except json.JSONDecodeError:
-        return None
-
-
 # ─── Account Selection ───────────────────────────────────
 
 
@@ -382,71 +364,9 @@ def pick_best(state, exclude=None):
 # ─── Swap (Mid-Session) ─────────────────────────────────
 
 
-def _keychain_service_for(config_dir):
-    """Get the keychain service name for a config dir.
-    Claude Code uses: Claude Code-credentials-{sha256(dir)[:8]}"""
-    import hashlib
-
-    h = hashlib.sha256(config_dir.encode()).hexdigest()[:8]
-    return f"Claude Code-credentials-{h}"
-
-
-def _write_keychain(service, creds_json):
-    """Write credentials to macOS keychain."""
-    import getpass
-
-    account = getpass.getuser()
-    # Delete existing entry first (security add fails if it exists)
-    subprocess.run(
-        ["security", "delete-generic-password", "-s", service, "-a", account],
-        capture_output=True,
-    )
-    # Add new entry
-    r = subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            creds_json,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return r.returncode == 0
-
-
-def _read_keychain(service):
-    """Read credentials from macOS keychain.
-    Returns raw JSON string. Handles both hex-encoded (Claude Code native)
-    and plain JSON (written by swap_to) formats."""
-    r = subprocess.run(
-        ["security", "find-generic-password", "-s", service, "-w"],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        return None
-    raw = r.stdout.strip()
-    if not raw:
-        return None
-    # If it starts with '{', it's already JSON
-    if raw.startswith("{"):
-        return raw
-    # Otherwise it's hex-encoded — decode
-    try:
-        return bytes.fromhex(raw).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return raw
-
-
 def swap_to(target_account):
     """Swap THIS terminal to a different account.
-    Updates both .credentials.json AND the macOS keychain entry
-    for this config dir (Claude Code reads from keychain)."""
+    Writes .credentials.json — Claude Code picks up new creds on next 401."""
     target_account = str(target_account)
     source_cred = CREDS_DIR / f"{target_account}.json"
     if not source_cred.exists():
@@ -460,70 +380,38 @@ def swap_to(target_account):
         )
         return False
 
-    service = _keychain_service_for(config_dir)
-
     with Lock():
-        # Write target credentials to keychain (Claude Code reads this)
         target_creds = source_cred.read_text()
-        _write_keychain(service, target_creds)
-
-        # Also write .credentials.json (fallback + polling)
         target_path = Path(config_dir) / ".credentials.json"
         target_path.write_text(target_creds)
         target_path.chmod(0o600)
 
-    # Track the actual account this terminal is on
     set_this_account(target_account)
-
-    # Update oauthAccount in .claude.json so Claude Code picks up the new identity
-    _update_oauth_account(config_dir, target_creds)
 
     email = get_email(target_account)
     print(f"Swapped to account {target_account} ({email})")
     return True
 
 
-def _update_oauth_account(config_dir, creds_json):
-    """Update oauthAccount in .claude.json from credential data.
-    Claude Code reads this to identify the current account."""
-    claude_json_path = Path(config_dir) / ".claude.json"
-    if not claude_json_path.exists():
-        return
-    try:
-        creds = json.loads(creds_json) if isinstance(creds_json, str) else creds_json
-        oauth = creds.get("claudeAiOauth", {})
-        # Get account info via auth status (fast, no API call)
-        r = subprocess.run(
-            ["claude", "auth", "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
-        )
-        if r.returncode == 0:
-            status = json.loads(r.stdout)
-            claude_data = json.loads(claude_json_path.read_text())
-            claude_data["oauthAccount"] = {
-                "accountUuid": status.get("orgId", ""),
-                "emailAddress": status.get("email", ""),
-                "organizationName": status.get("orgName", ""),
-                "subscriptionType": status.get("subscriptionType", ""),
-            }
-            claude_json_path.write_text(json.dumps(claude_data))
-    except Exception:
-        pass  # Non-critical — swap still works via keychain
-
-
 def extract_current(account_num):
-    """Save current keychain credentials as account N."""
-    creds = read_keychain()
-    if not creds:
-        print("error: no credentials in keychain", file=sys.stderr)
+    """Save current config dir's credentials as account N.
+    Reads from the active CLAUDE_CONFIG_DIR's .credentials.json."""
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+    cred_path = Path(config_dir) / ".credentials.json"
+    if not cred_path.exists():
+        print("error: no .credentials.json in config dir", file=sys.stderr)
+        return False
+
+    creds_text = cred_path.read_text()
+    try:
+        json.loads(creds_text)  # validate JSON
+    except json.JSONDecodeError:
+        print("error: .credentials.json is not valid JSON", file=sys.stderr)
         return False
 
     CREDS_DIR.mkdir(parents=True, exist_ok=True)
     cred_file = CREDS_DIR / f"{account_num}.json"
-    cred_file.write_text(json.dumps(creds, indent=2))
+    cred_file.write_text(creds_text)
     cred_file.chmod(0o600)
 
     r = subprocess.run(
@@ -540,7 +428,6 @@ def extract_current(account_num):
     p.setdefault("accounts", {})[str(account_num)] = {"email": email, "method": "oauth"}
     _save(PROFILES_FILE, p)
 
-    # Reset quota
     with Lock():
         state = load_state()
         state.setdefault("accounts", {})[str(account_num)] = {
@@ -550,11 +437,12 @@ def extract_current(account_num):
         }
         save_state(state)
 
-    # Update config dir
+    # Also copy to config dir if it exists
     cdir = config_dir_for(account_num)
     if cdir.exists():
-        (cdir / ".credentials.json").write_text(json.dumps(creds))
-        (cdir / ".credentials.json").chmod(0o600)
+        target = cdir / ".credentials.json"
+        target.write_text(creds_text)
+        target.chmod(0o600)
 
     print(f"Extracted credentials for account {account_num} ({email})")
     return True
