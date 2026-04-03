@@ -165,15 +165,21 @@ cmd_login() {
   local n="$1"
   [[ "$n" =~ ^[1-7]$ ]] || die "account must be 1-7, got: $n"
 
-  # Ensure config dir exists
+  # Ensure config dir exists with shared symlinks
   local config_dir="$ACCOUNTS_DIR/config-${n}"
   mkdir -p "$config_dir"
 
-  # Symlink settings if not already done
-  local global_settings="$HOME/.claude/settings.json"
-  if [[ -f "$global_settings" ]] && [[ ! -L "$config_dir/settings.json" ]]; then
-    ln -sf "$global_settings" "$config_dir/settings.json"
-  fi
+  # Symlink shared state to global ~/.claude/
+  for item in settings.json projects plugins; do
+    local target="$HOME/.claude/$item"
+    local link="$config_dir/$item"
+    if [[ -e "$target" ]] && [[ ! -L "$link" ]]; then
+      # If real dir exists, remove it (setup_config_dirs merges first)
+      [[ -d "$link" ]] && rm -rf "$link"
+      [[ -e "$link" ]] && rm -f "$link"
+      ln -sf "$target" "$link"
+    fi
+  done
 
   echo "Logging in to account $n..."
   echo "A browser will open. Sign in with the account you want for slot $n."
