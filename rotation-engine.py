@@ -193,8 +193,32 @@ def this_config_dir():
 def config_dir_for(n):
     return ACCOUNTS_DIR / f"config-{n}"
 
+def _symlink(target, link_path):
+    """Create or replace a symlink."""
+    if link_path.is_symlink() or link_path.exists():
+        if link_path.is_dir() and not link_path.is_symlink():
+            # Real directory — merge contents into global, then replace with symlink
+            import shutil
+            global_path = GLOBAL_CLAUDE_DIR / link_path.name
+            if global_path.exists():
+                # Copy any unique files from config dir to global
+                for item in link_path.iterdir():
+                    dest = global_path / item.name
+                    if not dest.exists():
+                        if item.is_dir():
+                            shutil.copytree(item, dest)
+                        else:
+                            shutil.copy2(item, dest)
+            shutil.rmtree(link_path)
+        else:
+            link_path.unlink()
+    link_path.symlink_to(target)
+
+
 def setup_config_dirs():
-    """Create/update config dirs for all accounts with credentials."""
+    """Create/update config dirs for all accounts with credentials.
+    Shared state (projects, sessions, memory) is symlinked to ~/.claude/
+    so all terminals see the same conversation history and memory."""
     for n in map(str, range(1, MAX_ACCOUNTS + 1)):
         cred_file = CREDS_DIR / f"{n}.json"
         if not cred_file.exists():
@@ -208,13 +232,9 @@ def setup_config_dirs():
         target_cred.write_text(json.dumps(creds))
         target_cred.chmod(0o600)
 
-        # Settings — symlink to global settings.json
-        settings_link = cdir / "settings.json"
-        global_settings = GLOBAL_CLAUDE_DIR / "settings.json"
-        if global_settings.exists():
-            if settings_link.exists() or settings_link.is_symlink():
-                settings_link.unlink()
-            settings_link.symlink_to(global_settings)
+        # Symlink shared state to global ~/.claude/
+        _symlink(GLOBAL_CLAUDE_DIR / "settings.json", cdir / "settings.json")
+        _symlink(GLOBAL_CLAUDE_DIR / "projects", cdir / "projects")
 
         email = get_email(n)
         print(f"  {n}  {email} → {cdir}")
