@@ -54,7 +54,7 @@ with open(f, 'w') as fh:
   echo "$n" > "$config_dir/.current-account"
   CLAUDE_CONFIG_DIR="$config_dir" python3 "$ENGINE" init-keychain "$n" 2>/dev/null || true
 
-  echo "Account $n saved ($email)."
+  printf 'Account %s saved (%s).\n' "$n" "$email"
 }
 
 cmd_run() {
@@ -75,6 +75,7 @@ cmd_run() {
 
 cmd_use() {
   local profile="$1"
+  [[ "$profile" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid profile name: $profile"
   local settings_dir="$HOME/.claude"
   local active="$settings_dir/settings.json"
   local target="$settings_dir/settings-${profile}.json"

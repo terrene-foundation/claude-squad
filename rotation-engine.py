@@ -392,13 +392,25 @@ def auto_rotate(force=False):
     current = which_account()
 
     if force and current:
-        # Mark current account as exhausted on disk (load raw, don't reset)
-        raw = _load(QUOTA_FILE, {"accounts": {}})
-        raw.setdefault("accounts", {}).setdefault(current, {})["five_hour"] = {
-            "used_percentage": 100,
-            "resets_at": time.time() + 18000,
-        }
-        _save(QUOTA_FILE, raw)
+        # Mark current account as exhausted on disk (locked, load raw)
+        lock_file = QUOTA_FILE.with_suffix(".lock")
+        lock_fd = None
+        try:
+            lock_fd = open(lock_file, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            raw = _load(QUOTA_FILE, {"accounts": {}})
+            raw.setdefault("accounts", {}).setdefault(current, {})["five_hour"] = {
+                "used_percentage": 100,
+                "resets_at": time.time() + 18000,
+            }
+            _save(QUOTA_FILE, raw)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    lock_fd.close()
+                except Exception:
+                    pass
 
     state = load_state()
     acct = state.get("accounts", {}).get(current or "", {})
@@ -434,6 +446,7 @@ def update_quota(json_str):
 
     # Lock, load, modify, save, unlock — prevents concurrent terminal races
     lock_file = QUOTA_FILE.with_suffix(".lock")
+    lock_fd = None
     try:
         lock_fd = open(lock_file, "w")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -445,11 +458,12 @@ def update_quota(json_str):
         }
         _save(QUOTA_FILE, state)
     finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-        except Exception:
-            pass
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
 
     # Auto-rotate at 100% (only if config dir is set)
     if _config_dir():

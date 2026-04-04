@@ -60,9 +60,9 @@ ok "Config dirs created"
 # Patch settings.json — statusline + auto-rotate hook
 SETTINGS_FILE="$HOME/.claude/settings.json"
 [[ -f "$SETTINGS_FILE" ]] || echo '{}' > "$SETTINGS_FILE"
-python3 -c "
-import json
-f = '$SETTINGS_FILE'
+CSQ_SETTINGS="$SETTINGS_FILE" python3 -c "
+import json, os
+f = os.environ['CSQ_SETTINGS']
 try:
     with open(f) as fh: s = json.load(fh)
 except (FileNotFoundError, json.JSONDecodeError, ValueError): s = {}
