@@ -244,6 +244,13 @@ main() {
       [[ $# -ge 1 ]] || die "usage: csq use <profile>  (e.g., mm, zai, default)"
       cmd_use "$1"
       ;;
+    swap)
+      shift
+      [[ $# -ge 1 ]] || die "usage: csq swap <N>  (swap THIS terminal to account N)"
+      [[ "$1" =~ ^[1-9][0-9]*$ ]] || die "account must be a positive integer, got: $1"
+      [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] || die "csq swap only works in a csq terminal (CLAUDE_CONFIG_DIR not set — use 'csq run $1' instead)"
+      python3 "$ENGINE" swap "$1"
+      ;;
     cleanup)
       python3 "$ENGINE" cleanup
       ;;
@@ -253,11 +260,12 @@ csq — Claude Squad account manager
 
   csq login <N>          Save current account as slot N (+ set up keychain)
   csq run <N> [args...]  Start Claude Code on account N (flags passed through)
-  csq status        Show all accounts + quota
-  csq suggest       Suggest which account to /login to
-  csq use <profile>  Switch settings (mm, zai, default)
-  csq cleanup       Remove stale PID cache files
-  csq help          This message
+  csq swap <N>           Swap THIS terminal to account N (in-place, no restart)
+  csq status             Show all accounts + quota
+  csq suggest            Suggest which account to /login to
+  csq use <profile>      Switch settings (mm, zai, default)
+  csq cleanup            Remove stale PID cache files
+  csq help               This message
 
 Setup:
   1. /login to an account in Claude

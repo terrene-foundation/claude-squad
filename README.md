@@ -68,8 +68,11 @@ Each terminal survives reboots. The account assignment persists because the keyc
 If started via `csq run` (has `CLAUDE_CONFIG_DIR`):
 
 ```
-/rotate       # auto-swaps: refreshes best account's token, writes to THIS terminal's keychain
+/rotate       # auto-swaps to best available account
+/rotate 3     # swap to a specific account (account 3)
 ```
+
+Both refresh the target account's token and write to THIS terminal's keychain entry. CC picks up the new creds on the next API call — no restart, no other terminals affected.
 
 If started without `csq run`:
 
