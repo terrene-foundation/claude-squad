@@ -89,6 +89,24 @@ cmd_run() {
   local n="$1"; shift
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || die "account must be a positive integer, got: $n"
 
+  # Parse --profile/-p flag (everything else passes through to claude)
+  local profile=""
+  local claude_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile|-p)
+        shift
+        [[ $# -ge 1 ]] || die "--profile requires an argument (e.g., --profile mm)"
+        profile="$1"
+        shift
+        ;;
+      *)
+        claude_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
   local config_dir="$ACCOUNTS_DIR/config-$n"
   local cred_file="$ACCOUNTS_DIR/credentials/$n.json"
   local default_dir="$HOME/.claude"
@@ -97,10 +115,13 @@ cmd_run() {
   [[ -f "$cred_file" ]] || die "no credentials for account $n — run: csq login $n"
 
   # --- Symlink shared artifacts from ~/.claude ---
-  # Only credentials and account identity stay isolated in config-N.
-  # Everything else (history, projects/memory, settings, sessions, etc.)
+  # Only credentials, account identity, and settings.json stay isolated.
+  # settings.json is built fresh on every run from the canonical default
+  # (~/.claude/settings.json) plus any --profile overlay. Each csq terminal
+  # gets its own snapshot — global default changes don't affect running terminals.
+  # Everything else (history, projects/memory, sessions, commands, skills, etc.)
   # is symlinked so csq terminals see the same state as default terminals.
-  local isolated=(".credentials.json" ".current-account" ".claude.json" "accounts")
+  local isolated=(".credentials.json" ".current-account" ".claude.json" "accounts" "settings.json")
   for item in "$default_dir"/* "$default_dir"/.*; do
     local base
     base="$(basename "$item")"
@@ -157,45 +178,51 @@ if not d.get('hasCompletedOnboarding'):
     with open(p, 'w') as f: json.dump(d, f, indent=2)
 " 2>/dev/null || true
 
+  # --- Build settings.json: default + optional profile overlay ---
+  # Canonical default = ~/.claude/settings.json (always the base, never mutated by csq)
+  # Profile overlay   = ~/.claude/settings-<name>.json (deep-merged on top if -p given)
+  # Result is written as a real file in config-N, isolated from other terminals.
+  CSQ_DEFAULT="$default_dir/settings.json" \
+  CSQ_OVERLAY="${profile:+$default_dir/settings-${profile}.json}" \
+  CSQ_OUTPUT="$config_dir/settings.json" \
+  python3 -c "
+import json, os, sys
+default_path = os.environ['CSQ_DEFAULT']
+overlay_path = os.environ.get('CSQ_OVERLAY') or ''
+output_path = os.environ['CSQ_OUTPUT']
+
+if not os.path.exists(default_path):
+    print(f'default settings not found: {default_path}', file=sys.stderr)
+    sys.exit(1)
+with open(default_path) as f:
+    merged = json.load(f)
+
+if overlay_path:
+    if not os.path.exists(overlay_path):
+        print(f'profile not found: {overlay_path}', file=sys.stderr)
+        sys.exit(1)
+    with open(overlay_path) as f:
+        overlay = json.load(f)
+    def deep_merge(a, b):
+        result = dict(a)
+        for k, v in b.items():
+            if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                result[k] = deep_merge(result[k], v)
+            else:
+                result[k] = v
+        return result
+    merged = deep_merge(merged, overlay)
+
+with open(output_path, 'w') as f:
+    json.dump(merged, f, indent=2)
+" || die "failed to build settings.json"
+
   local email
   email=$(python3 "$ENGINE" email "$n" 2>/dev/null)
-  echo "Starting Claude Code on account $n${email:+ ($email)}"
-  exec env CLAUDE_CONFIG_DIR="$config_dir" claude "$@"
-}
-
-cmd_use() {
-  local profile="$1"
-  [[ "$profile" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid profile name: $profile"
-  local settings_dir="$HOME/.claude"
-  local active="$settings_dir/settings.json"
-  local target="$settings_dir/settings-${profile}.json"
-
-  # "default" means the base settings (no suffix)
-  if [ "$profile" = "default" ]; then
-    target="$settings_dir/settings-default.json"
-  fi
-
-  [[ -f "$target" ]] || die "profile not found: $target"
-
-  # Save current settings as its profile name if not already saved
-  # Detect current profile by checking which settings-*.json matches
-  if [[ -f "$active" ]]; then
-    local current_profile="default"
-    for f in "$settings_dir"/settings-*.json; do
-      [[ -f "$f" ]] || continue
-      local name="${f##*/settings-}"
-      name="${name%.json}"
-      if diff -q "$active" "$f" >/dev/null 2>&1; then
-        current_profile="$name"
-        break
-      fi
-    done
-    # Always save current as its profile before switching
-    cp "$active" "$settings_dir/settings-${current_profile}.json"
-  fi
-
-  cp "$target" "$active"
-  echo "Switched to settings profile: $profile"
+  local profile_label=""
+  [[ -n "$profile" ]] && profile_label=" [profile: $profile]"
+  echo "Starting Claude Code on account $n${email:+ ($email)}${profile_label}"
+  exec env CLAUDE_CONFIG_DIR="$config_dir" claude "${claude_args[@]}"
 }
 
 cmd_suggest() {
@@ -239,11 +266,6 @@ main() {
     suggest)
       cmd_suggest
       ;;
-    use|settings)
-      shift
-      [[ $# -ge 1 ]] || die "usage: csq use <profile>  (e.g., mm, zai, default)"
-      cmd_use "$1"
-      ;;
     swap)
       shift
       [[ $# -ge 1 ]] || die "usage: csq swap <N>  (swap THIS terminal to account N)"
@@ -258,26 +280,32 @@ main() {
       cat <<'HELP'
 csq — Claude Squad account manager
 
-  csq login <N>          Save current account as slot N (+ set up keychain)
-  csq run <N> [args...]  Start Claude Code on account N (flags passed through)
-  csq swap <N>           Swap THIS terminal to account N (in-place, no restart)
-  csq status             Show all accounts + quota
-  csq suggest            Suggest which account to /login to
-  csq use <profile>      Switch settings (mm, zai, default)
-  csq cleanup            Remove stale PID cache files
-  csq help               This message
+  csq login <N>                  Save current account as slot N (+ set up keychain)
+  csq run <N> [-p <prof>] [args] Start Claude Code on account N
+                                   -p / --profile <name>: overlay ~/.claude/settings-<name>.json
+                                   any other args pass through to claude
+  csq swap <N>                   Swap THIS terminal to account N (in-place, no restart)
+  csq status                     Show all accounts + quota
+  csq suggest                    Suggest which account to /login to
+  csq cleanup                    Remove stale PID cache files
+  csq help                       This message
+
+Settings model:
+  ~/.claude/settings.json is the canonical default. csq NEVER mutates it.
+  Profiles are overlays at ~/.claude/settings-<name>.json — only need to
+  contain the diff (e.g., env vars to switch API provider).
+
+  csq run 5             → uses default settings as-is
+  csq run 5 -p mm       → deep-merges settings-mm.json over default
+  csq run 5 -p mm --resume → same, plus claude --resume
+
+  Each csq terminal gets its own settings.json snapshot at startup.
+  No global state. No "switching back". Restart to change profile.
 
 Setup:
-  1. /login to an account in Claude
-  2. csq login 1    (saves it as slot 1)
-  3. Repeat for each account
-
-Daily use:
-  csq run 1         Start CC on account 1 (isolated keychain)
-  csq run 3         Start CC on account 3 (separate terminal)
-
-When rate limited, /rotate auto-switches (if started via csq run).
-Otherwise: csq suggest, then /login <email> manually.
+  1. csq login 1    (opens browser, saves account 1's creds)
+  2. Repeat for each account
+  3. csq run 1      (start CC on account 1)
 HELP
       ;;
     *)

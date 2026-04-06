@@ -11,10 +11,10 @@ Claude Max has rolling rate limits (5-hour and 7-day windows). Heavy users hit t
 - **Auto-rotates** when you hit rate limits — refreshes OAuth token, writes to keychain, CC picks up new creds
 - **Per-terminal isolation** — each terminal gets its own keychain entry via `CLAUDE_CONFIG_DIR`, so rotating one terminal doesn't affect others
 - **Shared history & memory** — conversations, projects, and auto-memory are symlinked from `~/.claude`, so `/resume` works across all accounts
-- **Context & cost in statusline** — see `ctx:241k 24% | $5.39` at a glance
+- **Context & cost in statusline** — see `⚡csq #5:jack 5h:42% | ctx:241k 24% | $5.39` at a glance
 - **Smart account picking** — switches to the account with the most available quota
 - **Unlimited accounts** — log in as many accounts as you have (1, 7, 20 — no cap)
-- **Settings profiles** — swap between settings.json variants (e.g., different model configs)
+- **Profile overlays** — start a terminal with a different API provider via `csq run N -p mm` (overlays merge over the canonical default)
 
 ## Install
 
@@ -83,14 +83,48 @@ If started without `csq run`:
 ### From terminal
 
 ```bash
-csq status        # show all accounts with quota and reset times
-csq suggest       # suggest which account to /login to
-csq run 4         # start CC on account 4
-csq use mm        # switch to settings-mm.json profile
-csq use default   # switch back to default settings
-csq cleanup       # remove stale PID cache files
-csq help          # full command list
+csq status              # show all accounts with quota and reset times
+csq suggest             # suggest which account to /login to
+csq run 4               # start CC on account 4 (default settings)
+csq run 4 -p mm         # start CC on account 4 with mm profile overlay
+csq run 4 --resume      # resume the most recent conversation
+csq swap 3              # in-place swap THIS terminal to account 3
+csq cleanup             # remove stale PID cache files
+csq help                # full command list
 ```
+
+## Profile overlays
+
+Profiles are **overlays** at `~/.claude/settings-<name>.json` that get deep-merged onto the canonical `~/.claude/settings.json` at terminal start.
+
+Each profile only needs to contain the diff. Most profiles only need an `env` block to switch API provider:
+
+```jsonc
+// ~/.claude/settings-mm.json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.minimax.io/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "sk-...",
+    "ANTHROPIC_MODEL": "MiniMax-M2.7-highspeed",
+  },
+}
+```
+
+When you run `csq run 5 -p mm`, csq:
+
+1. Reads `~/.claude/settings.json` (full default — hooks, statusLine, plugins, etc.)
+2. Reads `~/.claude/settings-mm.json` (overlay)
+3. Deep-merges them (overlay keys override; nested dicts merge recursively)
+4. Writes the result to `config-5/settings.json` as a real file
+
+Result: the mm terminal has the mm API routing AND all the default hooks/statusline/plugins. No duplication, no need to keep multiple full settings files in sync.
+
+**Properties:**
+
+- **No global state.** csq never mutates `~/.claude/settings.json`. The default is the default.
+- **No "switch back".** Each `csq run` is fresh. To use mm again, just `csq run N -p mm` again.
+- **Stateless per run.** No `.profile` file, no memory between runs.
+- **Restart to change profile.** `env` vars are read at process startup, so you can't hot-swap providers.
 
 ## How it works
 
