@@ -1,6 +1,6 @@
 # Claude Squad
 
-Multi-account rotation for Claude Code. Pool Claude Max subscriptions with automatic, quota-aware switching — each terminal isolated, no cross-contamination.
+Account rotation, quota tracking, and profile overlays for Claude Code. Pool multiple Claude Max subscriptions with automatic, quota-aware switching — or use it on a single account just for the statusline and profile overlays. Each terminal isolated, no cross-contamination.
 
 ## The problem
 
@@ -58,13 +58,15 @@ You can also save the credentials of an already-logged-in CC session — just ru
 
 ## Daily use
 
-Start Claude Code on a specific account — each terminal is isolated:
+With multiple accounts, start each terminal on a specific one — each gets its own keychain slot:
 
 ```bash
 csq run 1     # terminal 1 → account 1 (own keychain entry)
 csq run 3     # terminal 2 → account 3 (separate keychain entry)
 csq run 5     # terminal 3 → account 5 (separate keychain entry)
 ```
+
+If you have only one account configured, `csq` (no number) auto-resolves it. With zero accounts, `csq` is invisible — it just runs vanilla `claude`.
 
 Any extra arguments are passed straight through to `claude`:
 
@@ -110,16 +112,15 @@ csq help                # full command list
 
 Profiles are **overlays** at `~/.claude/settings-<name>.json` that get deep-merged onto the canonical `~/.claude/settings.json` at terminal start.
 
-Each profile only needs to contain the diff. Most profiles only need an `env` block to switch API provider:
+Each profile only needs to contain the diff. Most profiles only need an `env` block to switch API provider. Example `~/.claude/settings-mm.json`:
 
-```jsonc
-// ~/.claude/settings-mm.json
+```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://api.minimax.io/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "sk-...",
-    "ANTHROPIC_MODEL": "MiniMax-M2.7-highspeed",
-  },
+    "ANTHROPIC_MODEL": "MiniMax-M2.7-highspeed"
+  }
 }
 ```
 
@@ -154,13 +155,14 @@ csq run 3
 
 ### Shared artifacts
 
-Only credentials and account identity stay isolated. Everything else in `~/.claude` (projects, sessions, history, settings, plugins, commands, agents, skills, memory) is symlinked into each `config-N/` on every `csq run`. So all terminals see the same conversations, the same `/resume` list, and the same auto-memory — only the account changes.
+Only credentials, account identity, and `settings.json` stay isolated. Everything else in `~/.claude` (projects, sessions, history, plugins, commands, agents, skills, memory) is symlinked into each `config-N/` on every `csq run`. So all terminals see the same conversations, the same `/resume` list, and the same auto-memory — only the account and (optionally) the profile change.
 
 Files that stay isolated per config dir:
 
 - `.credentials.json` — OAuth tokens for this terminal's account
 - `.current-account` — slot number this terminal is on
 - `.claude.json` — onboarding state
+- `settings.json` — fresh snapshot built from `~/.claude/settings.json` plus optional `-p` overlay
 
 ### Auto-rotation flow
 
@@ -192,7 +194,7 @@ No browser needed after initial setup.
 | File                  | Installed to          | Purpose                                                    |
 | --------------------- | --------------------- | ---------------------------------------------------------- |
 | `rotation-engine.py`  | `~/.claude/accounts/` | Core engine: quota tracking, token refresh, keychain write |
-| `csq`                 | `~/.local/bin/`       | CLI: login, run, status, suggest, settings swap            |
+| `csq`                 | `~/.local/bin/`       | CLI: login, run, status, suggest, swap, profile overlays   |
 | `statusline-quota.sh` | `~/.claude/accounts/` | Statusline hook: feeds quota to engine, shows account + %  |
 | `auto-rotate-hook.sh` | `~/.claude/accounts/` | UserPromptSubmit hook: triggers rotation at 100%           |
 | `rotate.md`           | `~/.claude/commands/` | `/rotate` slash command                                    |
@@ -213,7 +215,7 @@ No browser needed after initial setup.
 - Claude Code CLI
 - Python 3
 - jq
-- Two or more Claude Max subscriptions
+- One or more Claude accounts (single-account mode is fully supported; rotation needs ≥2)
 
 ## Uninstall
 
