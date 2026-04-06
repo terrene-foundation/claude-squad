@@ -19,40 +19,63 @@ cmd_login() {
   local n="$1"
   [[ "$n" =~ ^[1-7]$ ]] || die "account must be 1-7, got: $n"
 
-  # Get current email from active session
+  local config_dir="$ACCOUNTS_DIR/config-$n"
+  mkdir -p "$config_dir" "$ACCOUNTS_DIR/credentials"
+
+  # Launch CC login with the account's config dir — opens browser
+  echo "Opening browser to log in for account $n..."
+  timeout 300 env CLAUDE_CONFIG_DIR="$config_dir" claude auth login || die "Login timed out or failed"
+
+  # After login, get email from the new session
   local email
-  email=$(claude auth status --json 2>/dev/null \
+  email=$(CLAUDE_CONFIG_DIR="$config_dir" claude auth status --json 2>/dev/null \
     | python3 -c "import json,sys; print(json.load(sys.stdin).get('email','unknown'))" 2>/dev/null \
     || echo "unknown")
 
-  # Save credentials
-  mkdir -p "$ACCOUNTS_DIR/credentials"
-  local cred_file="$HOME/.claude/.credentials.json"
-  if [[ -f "$cred_file" ]]; then
-    cp "$cred_file" "$ACCOUNTS_DIR/credentials/${n}.json"
-    chmod 600 "$ACCOUNTS_DIR/credentials/${n}.json"
-  else
-    echo "warning: no .credentials.json found — credentials are in keychain only" >&2
-  fi
+  # Extract credentials from this config dir's keychain entry and save
+  CSQ_CONFIG_DIR="$config_dir" CSQ_ACCT="$n" CSQ_CREDS_DIR="$ACCOUNTS_DIR/credentials" python3 -c "
+import getpass, hashlib, json, os, subprocess, unicodedata
 
-  # Save profile (pass values via env to avoid shell injection via email)
+config_dir = os.environ['CSQ_CONFIG_DIR']
+n = os.environ['CSQ_ACCT']
+creds_dir = os.environ['CSQ_CREDS_DIR']
+
+# Read from this config dir's keychain entry
+normalized = unicodedata.normalize('NFC', config_dir)
+h = hashlib.sha256(normalized.encode()).hexdigest()[:8]
+service = f'Claude Code-credentials-{h}'
+import getpass as gp
+r = subprocess.run(['security', 'find-generic-password', '-a', gp.getuser(), '-s', service, '-w'],
+                    capture_output=True, text=True)
+if r.returncode == 0 and r.stdout.strip():
+    raw = r.stdout.strip()
+    try:
+        creds = json.loads(raw)
+    except json.JSONDecodeError:
+        creds = json.loads(bytes.fromhex(raw).decode('utf-8'))
+    cred_file = os.path.join(creds_dir, f'{n}.json')
+    with open(cred_file, 'w') as f:
+        json.dump(creds, f, indent=2)
+    os.chmod(cred_file, 0o600)
+    print(f'  Credentials saved to slot {n}')
+else:
+    print('  warning: could not read credentials from keychain')
+" 2>/dev/null
+
+  echo "$n" > "$config_dir/.current-account"
+
+  # Save profile
   CSQ_ACCT="$n" CSQ_EMAIL="$email" CSQ_FILE="$ACCOUNTS_DIR/profiles.json" python3 -c "
 import json, os
 f = os.environ['CSQ_FILE']
 try:
-    d = json.load(open(f))
+    with open(f) as fh: d = json.load(fh)
 except (FileNotFoundError, json.JSONDecodeError, ValueError):
     d = {'accounts': {}}
 d.setdefault('accounts', {})[os.environ['CSQ_ACCT']] = {'email': os.environ['CSQ_EMAIL'], 'method': 'oauth'}
 with open(f, 'w') as fh:
     json.dump(d, fh, indent=2)
 " 2>/dev/null
-
-  # Create config dir and write to its keychain entry
-  local config_dir="$ACCOUNTS_DIR/config-$n"
-  mkdir -p "$config_dir"
-  echo "$n" > "$config_dir/.current-account"
-  CLAUDE_CONFIG_DIR="$config_dir" python3 "$ENGINE" init-keychain "$n" 2>/dev/null || true
 
   printf 'Account %s saved (%s).\n' "$n" "$email"
 }
