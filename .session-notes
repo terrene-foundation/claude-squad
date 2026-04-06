@@ -2,46 +2,49 @@
 
 ### Read These Files First (in order)
 
-1. `rotation-engine.py` — core engine: quota tracking, OAuth token refresh, per-terminal keychain write, auto-rotate
-2. `csq` — CLI: `csq login N` (browser OAuth + save), `csq run N` (isolated CC), `csq use <profile>`, `csq status/suggest`
-3. `statusline-quota.sh` — statusline hook: shows `ctx:241k 24% | $5.39`, feeds quota to engine
-4. `auto-rotate-hook.sh` — UserPromptSubmit hook: triggers rotation at 100% (only when CLAUDE_CONFIG_DIR set)
-5. `rotate.md` — /rotate skill: auto-swaps when config dir set, suggests /login otherwise
-6. `install.sh` — installer: files, config dirs, settings.json (statusline + hook)
-7. `README.md` — public-facing docs, install instructions, architecture explanation
+1. `csq` — CLI script, REWRITTEN this session. Profile overlay model, auto-resolve, args pass-through.
+2. `rotation-engine.py` — core engine (unchanged this session): quota tracking, OAuth refresh, swap, suggest.
+3. `statusline-quota.sh` — adds `⚡csq` marker when CLAUDE_CONFIG_DIR points at config-N.
+4. `rotate.md` — `/rotate` and `/rotate N` slash command. Deployed to `~/.claude/commands/rotate.md`.
+5. `README.md` — fully updated for overlay model + single-account mode.
+6. `auto-rotate-hook.sh` — UserPromptSubmit hook (unchanged): triggers rotation at 100% when CLAUDE_CONFIG_DIR set.
 
 ### Accomplished
 
-- **Per-terminal keychain isolation**: Each terminal uses `CLAUDE_CONFIG_DIR=~/.claude/accounts/config-N`, giving it a unique keychain entry `Claude Code-credentials-<sha256(dir)[:8]>`. Auto-rotate writes to THAT entry only.
-- **`csq login N`**: Opens browser via `claude auth login`, reads creds from keychain, saves to `credentials/N.json`. All 7 accounts logged in and verified (35/35 checks pass).
-- **`csq run N`**: Starts `claude` with isolated config dir. Survives reboots.
-- **`csq use <profile>`**: Swaps `settings.json` between named profiles (mm, zai, default).
-- **Statusline fix**: Now reads `current_usage` (cache_creation + cache_read + input + output) instead of `total_input_tokens` (which excluded cache). Shows `ctx:241k 24%` matching CC's own count.
-- **Red team convergence**: 4 rounds. Fixed shell injection (env vars), atomic writes, file locking (fcntl.flock), path traversal validation, stale docs. 2 consecutive clean rounds.
-- **Pushed to GitHub**: All commits on `terrene-foundation/claude-squad` main. Curl install works.
-- Renamed `cc` → `csq` (Rust linker conflict).
+- **Profile overlay redesign**: removed `csq use` (no global mutable state). `~/.claude/settings.json` is canonical default; `settings-<name>.json` files are overlays containing only the diff. `csq run N -p mm` deep-merges overlay over default at startup, writes real file to `config-N/settings.json`. Stateless per run.
+- **Single-account zero-friction**: `csq` (no args) auto-resolves: 0 accounts → exec vanilla `claude`; 1 account → use it; 2+ → ask which.
+- **Unlimited accounts**: validation regex changed from `[1-7]` to `[1-9][0-9]*`.
+- **Args pass-through**: `csq run N --resume` forwards all extra args to `claude`. Uses set-u-safe `${arr[@]+"${arr[@]}"}` pattern.
+- **Targeted rotation**: `csq swap N` and `/rotate N` swap THIS terminal to a specific account in-place (no restart).
+- **`⚡csq` statusline marker**: explicit prefix when CLAUDE_CONFIG_DIR points at `~/.claude/accounts/config-N`.
+- **Pre-symlinked all configs**: configs 1-6 had no `commands/` symlink (only config-7). Manually created 36 symlinks per config so `/rotate` works in every csq terminal.
+- **Pre-converted settings.json to real files** in all 7 configs so existing terminals are isolated from `~/.claude/settings.json` mutations.
+- **Pushed**: 03dced3, ddf57ef, 0a1643b, 85fe787, 2de3451, 5102547 on `terrene-foundation/claude-squad` main.
 
 ### Outstanding
 
-- [ ] **Test auto-rotate end-to-end**: Start with `csq run N`, hit rate limit, verify `/rotate` auto-swaps to another account without affecting other terminals.
-- [ ] **Statusline still copies to old path**: `~/.claude/statusline-command.sh` is a copy. Settings.json points there. Should canonicalize to `~/.claude/accounts/statusline-quota.sh`.
-- [ ] **Remove debug dump**: `statusline-quota.sh` may still have `/tmp/csq-statusline-debug.json` write (check and remove if present).
-- [ ] **Accounts 5/6 swapped**: profiles.json now has 5=terrene.foundation, 6=integrum.global (was reversed). Not a bug — just re-logged in different order.
+- [ ] **`~/.claude/settings-zai.json` is empty (0 bytes)** — user must populate it before `csq run N -p zai` will work.
+- [ ] **User can optionally simplify `~/.claude/settings-mm.json`** to just the `env` block — deep-merge will inherit hooks/statusline/plugins from default.
+- [ ] **Two csq locations**: `~/.local/bin/csq` is the canonical PATH location. `~/.claude/accounts/csq` is a redundant copy. Any csq edits MUST be deployed to BOTH. Consider changing `install.sh` to install only to `~/.local/bin/` and remove the duplicate.
+- [ ] **Hot-swap profile is impossible** by design — env vars are startup-only. Confirmed with user. Document this clearly somewhere if confusion comes up.
+- [ ] **No `csq sync` command** — if user installs new global plugins/skills, existing csq terminals won't see them until next `csq run N` (which re-runs the symlink loop). Consider adding `csq sync` that re-symlinks across all configs without restarting.
 
 ### Oversight — Verify Before Starting
 
-- [ ] `csq status` shows all 7 accounts with emails
-- [ ] `csq run 1` starts CC on account 1 (check statusline shows `#1:jack.hong`)
-- [ ] All deployed files match repo: `diff ~/.claude/accounts/rotation-engine.py rotation-engine.py`
-- [ ] Settings.json has both statusline and UserPromptSubmit hook configured
+- [ ] `which csq` returns `/Users/esperie/.local/bin/csq`
+- [ ] `csq help` shows new commands (no `csq use`; has `csq swap`; has `-p <prof>` for `csq run`)
+- [ ] All 7 configs have `commands/` symlinked: `for i in 1 2 3 4 5 6 7; do readlink ~/.claude/accounts/config-$i/commands; done` should print `/Users/esperie/.claude/commands` 7 times
+- [ ] All 7 configs have REAL `settings.json` (not symlinks): `for i in 1 2 3 4 5 6 7; do file ~/.claude/accounts/config-$i/settings.json; done`
+- [ ] Statusline shows `⚡csq` prefix in this terminal (confirms config-7 detection works)
 
 ### Oversight — Verify After Completing
 
-- [ ] `csq suggest` outputs correct recommendation
-- [ ] `/rotate` works in a `csq run` terminal (auto-swaps, not just suggests)
-- [ ] Statusline shows correct context tokens (matches CC's own count)
-- [ ] No `/tmp/csq-statusline-debug.json` dump in production
+- [ ] Deploy any csq edits to BOTH `~/.local/bin/csq` AND `~/.claude/accounts/csq`
+- [ ] `bash -n csq` syntax check passes
+- [ ] `csq help` runs without error
+- [ ] `git status` clean before committing
+- [ ] Commit message ends with `Co-Authored-By: Claude Opus 4.6 (1M context)`
 
 ### Blockers
 
-- None. System is fully functional. End-to-end auto-rotate test pending natural rate limit hit.
+- None. System is stable and shipped. Open question: should `install.sh` deduplicate the csq location (remove `~/.claude/accounts/csq`)?

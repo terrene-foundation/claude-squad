@@ -318,18 +318,43 @@ def write_keychain(creds):
 
 
 def swap_to(target_account):
-    """Refresh target account's token and write to this terminal's keychain.
+    """Swap this terminal's keychain to target account.
+    Reuses the existing access token if still valid; only refreshes when expired.
     Only this terminal is affected — other terminals have their own keychain entries."""
     target_account = str(target_account)
     email = get_email(target_account)
 
-    print(
-        f"Refreshing token for account {target_account} ({email})...", file=sys.stderr
-    )
-    new_creds = refresh_token(target_account)
-    if not new_creds:
-        print("  Failed to refresh token", file=sys.stderr)
-        return False
+    # Try to reuse existing token if it's still valid (with a 5-minute safety buffer).
+    # The OAuth refresh endpoint is shared across all accounts on this client_id and
+    # gets aggressively throttled by Anthropic — so we only call it when truly needed.
+    cred_file = CREDS_DIR / f"{target_account}.json"
+    new_creds = None
+    if cred_file.exists():
+        try:
+            existing = json.loads(cred_file.read_text())
+            oauth = existing.get("claudeAiOauth", {})
+            expires_at = oauth.get("expiresAt", 0)
+            now_ms = int(time.time() * 1000)
+            buffer_ms = 5 * 60 * 1000  # 5 minutes
+            if oauth.get("accessToken") and expires_at > now_ms + buffer_ms:
+                remaining_min = (expires_at - now_ms) / 60_000
+                print(
+                    f"Using cached token for account {target_account} ({email}) — valid {remaining_min:.0f}m",
+                    file=sys.stderr,
+                )
+                new_creds = existing
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if new_creds is None:
+        print(
+            f"Refreshing token for account {target_account} ({email})...",
+            file=sys.stderr,
+        )
+        new_creds = refresh_token(target_account)
+        if not new_creds:
+            print("  Failed to refresh token", file=sys.stderr)
+            return False
 
     if not write_keychain(new_creds):
         print("  Failed to write keychain", file=sys.stderr)
