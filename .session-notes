@@ -1,44 +1,55 @@
-## Session Notes [root] — updated 2026-04-07
+## Session Notes [claude-squad] — updated 2026-04-08 (early morning)
 
 ### Read These Files First (in order)
 
-1. `rotation-engine.py` — core engine. HEAVILY MODIFIED this session. New: `snapshot_account()`, `_find_cc_pid()`, `credentials_file_account()`, `csq_account_marker()`, `write_csq_account_marker()`, `write_credentials_file()`. `swap_to()` rewritten: writes .credentials.json + .csq-account marker + best-effort keychain (3s timeout). Does NOT write .current-account.
-2. `csq` — CLI script. MODIFIED: `cmd_run()` now writes `.csq-account` marker, clears `.live-pid`, drops `init-keychain` call. Isolation list expanded with `.csq-account` and `.live-pid`.
-3. `statusline-quota.sh` — MODIFIED: calls `rotation-engine.py snapshot` synchronously before the backgrounded `update` call.
-4. `auto-rotate-hook.sh` — unchanged. Triggers rotation at 100%.
+1. `journal/0013-DISCOVERY-windows-ctypes-handle-truncation.md` — the critical CI false-positive bug found in final red team. Win32 HANDLE truncation. Most important institutional knowledge from the cross-platform work.
+2. `journal/0010-DECISION-remove-auto-rotate.md` — why csq is now manual-only. Auto-rotate fired on stale rate_limits and thrashed accounts.
+3. `journal/0011-DISCOVERY-stuck-access-tokens.md` — access tokens can be in a state where `auth.status` passes but `/v1/messages` returns 429 with no headers. Recovery is `csq login N`. Don't tell the user csq login won't help — it does.
+4. `journal/0012-DECISION-no-powershell-port.md` — why we chose Git Bash over PowerShell for Windows. CI proves 19/19 PASS on `windows-latest`. Saved ~400 lines of duplicate code.
+5. `workspaces/cross-platform/02-plans/02-revised-implementation-plan.md` — the implementation plan that was followed. All 32 todos completed and moved to `todos/completed/`.
+6. `rotation-engine.py` lines 86-118 — the centralized Win32 ctypes signatures. NEVER call `ctypes.windll.kernel32` afresh; always use the shared `_kernel32` module reference, otherwise signatures re-default.
+7. `rotation-engine.py` `backsync()` — uses refresh-token CONTENT MATCHING to identify the right canonical credential file. Race-proof.
+8. `rotation-engine.py` `update_quota()` cursor protection — `.quota-cursor` MUST NOT be deleted on swap (tried that, broke things).
 
-### Accomplished (this session)
+### Accomplished
 
-- **Fixed status line lying about active account**. Root cause: `csq swap N` only rewrote the macOS keychain, but CC v2.1+ reads `.credentials.json` at startup. The two stores drifted silently. Confirmed via cross-table: config-7 keychain=account3, .credentials.json=account7, CC actually using 7, status showing 3.
-- **New `.csq-account` marker** — durable identity record per config-dir. Written by `csq run N` and `csq swap N`. Survives CC's internal token refreshes (which change the access_token but not the account). Read by `snapshot_account()` as primary source.
-- **PID-based snapshot lifecycle** — `.live-pid` tracks the CC process. Snapshot runs once per CC process (cheap path: single `os.kill` probe, 36ms). On CC restart (PID dead/missing), walks parent tree to find new CC PID, reads `.csq-account`, writes `.current-account`. Prevents mid-session swap from corrupting the display.
-- **Keychain demoted to best-effort** — `write_keychain()` has 3s timeout, errors silenced. `.credentials.json` is the source of truth. No keychain reads in the snapshot path. Designed for 15+ concurrent csq terminals.
-- **Deployed** to all 3 locations: `~/.claude/accounts/rotation-engine.py`, `~/.local/bin/csq`, `~/.claude/accounts/csq`. NOT YET COMMITTED.
+- **Cross-platform support shipped**: macOS, Linux, WSL, Windows (via Git Bash). All 5 milestones complete.
+- **CI matrix** (.github/workflows/test.yml) — `macos × ubuntu × windows × Python 3.11/3.12` = 6 jobs, all green.
+- **C1 fix**: Win32 ctypes handles no longer truncated. Concurrent locking smoke test verifies on every push.
+- **`csq setkey/listkeys/rmkey`** for provider profiles (mm, zai, claude direct API). Interactive hidden-input by default. Preserves existing fields.
+- **Auto-rotate removed entirely** — `swap_to()` doesn't call refresh endpoint, `update_quota()` doesn't trigger swaps, hook is no-op.
+- **OAuth thundering herd fixed** — csq never hammers refresh endpoint; CC handles its own refreshes.
+- **Backsync race fixed** — content match (refresh token), not stale `.csq-account` marker.
+- **README rewritten** for non-technical users — `csq setkey mm` step-by-step, no JSON editing required.
+- **15+ commits pushed** (range `42b2a3f..e65d34f`).
 
 ### Outstanding
 
-- [ ] **COMMIT the changes** — `rotation-engine.py`, `statusline-quota.sh`, `csq` all modified. Not yet committed. User confirmed "done" — commit pending.
-- [ ] **User must restart all running csq terminals** via `csq run N` to get clean state. Existing terminals pre-date the `.csq-account` marker and `.live-pid` tracking.
-- [ ] **Quota misattribution in quota.json** — historical entries may have rate_limits attributed to the wrong account (because `.current-account` was lying). Will self-correct as terminals restart.
-- [ ] **Refresh-throttle bug in `auto_rotate()` callers** — only `swap_to()` was patched (prior session). `update_quota()` line ~498 calls `swap_to()` which now reuses cached tokens, but audit other `refresh_token()` callers if issues arise.
-- [ ] **`~/.claude/settings-zai.json` is empty (0 bytes)** — user must populate.
-- [ ] **Two csq deployment locations** — `~/.local/bin/csq` + `~/.claude/accounts/csq`. Edits MUST go to BOTH.
+- [ ] First statusline render after `csq swap` may show stale quota numbers for one cycle (until CC makes its first API call on the new account). Cosmetic. Worth a one-line fix in `statusline_str()` to suppress display when `.quota-cursor` doesn't match current account.
+- [ ] `auto_rotate()` function (rotation-engine.py:940-987) is dead code — only the CLI subcommand path. Decide: delete or keep as escape hatch.
+- [ ] Red team M-level findings unaddressed: M1 (`cleanup()` globs wrong files), M2 (PID reuse blind spot — could check `ps -o comm=` on cheap path), M3 (`.live-pid` written non-atomically). Low priority.
+- [ ] L7: smoke test doesn't exercise `swap_to()` end-to-end against a fake config dir. CI tests building blocks, not rotation logic. Worth adding.
+- [ ] Old `~/.claude/commands/rotate.md` may exist in some downstream installs. install.sh removes on upgrade only.
 
 ### Oversight — Verify Before Starting
 
-- [ ] `diff -q ~/.claude/accounts/rotation-engine.py ~/repos/terrene/claude-squad/rotation-engine.py` — no diff
-- [ ] `diff -q ~/.local/bin/csq ~/repos/terrene/claude-squad/csq` — no diff
+- [ ] `git log --oneline -3` shows `e65d34f` or later
+- [ ] `bash test-platform.sh` exits 0 with `PASS: 19, FAIL: 0`
+- [ ] `gh run list --workflow=test.yml --limit 1` shows `success`
+- [ ] `cat ~/.claude/settings.json | python3 -c "import json,sys; print(json.load(sys.stdin).get('hooks', {}))"` does NOT contain `auto-rotate-hook`
+- [ ] `ls ~/.claude/accounts/auto-rotate-hook.sh` exists (no-op file — DO NOT delete; old per-config snapshots may still reference it)
 - [ ] `python3 -m py_compile rotation-engine.py` passes
-- [ ] `bash -n csq` passes
-- [ ] `.csq-account` exists in config dirs of restarted terminals: `for i in 1 2 3 4 5 6 7; do echo "$i: $(cat ~/.claude/accounts/config-$i/.csq-account 2>/dev/null || echo MISSING)"; done`
+- [ ] Deployed copies in sync: `diff -q rotation-engine.py ~/.claude/accounts/rotation-engine.py && diff -q csq ~/.local/bin/csq && diff -q statusline-quota.sh ~/.claude/accounts/statusline-quota.sh`
 
 ### Oversight — Verify After Completing
 
-- [ ] Deploy edits to ALL 3 locations (engine + 2x csq)
-- [ ] `python3 -m py_compile` + `bash -n` pass
-- [ ] Cross-table check: `for n in 1..7: .csq-account == .current-account == credentials in .credentials.json`
-- [ ] Commit message follows conventional commits + Co-Authored-By
+- [ ] `bash test-platform.sh` still 19/19 PASS
+- [ ] No new direct `os.replace` (use `_atomic_replace` for Windows retry)
+- [ ] No new `os.kill(pid, 0)` (use `_is_pid_alive`)
+- [ ] No new `subprocess.run(["security", ...])` outside `IS_MACOS` guards
+- [ ] No new hardcoded `python3` in shell scripts (use `$PY`)
+- [ ] If touching ctypes: every kernel32 call goes through `_kernel32` with signatures pre-set. Never call `ctypes.windll.kernel32` afresh.
 
 ### Blockers
 
-- **User must restart terminals** — the fix is correct for new `csq run` sessions but cannot retroactively fix running CC processes that loaded credentials before the fix was deployed.
+None. Cross-platform work is shipped and CI-verified. Remaining items are polish.
