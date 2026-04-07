@@ -12,3 +12,6 @@ research/
 internal/
 upstream-internals/
 *.research.md
+
+# Phase test outputs and other ephemeral analysis data
+journal/*-data/

@@ -107,11 +107,9 @@ def which_account():
     Fallback: extracts from config dir name (config-N).
     Last resort: claude auth status --json.
 
-    NOTE: .current-account reflects the account whose OAuth token is in the
-    *running* CC instance, NOT what the keychain currently holds. The
-    statusline `snapshot` command keeps it accurate by detecting CC restarts
-    via PID and re-reading the keychain only then. swap_to() deliberately
-    does NOT touch this file — its writes only take effect on CC restart.
+    NOTE: .current-account is updated by the statusline `snapshot` command
+    which detects new CC processes via PID. swap_to() also writes this file
+    directly so the statusline picks up swaps immediately.
     """
     config_dir = _config_dir()
     if config_dir:
@@ -158,18 +156,11 @@ def which_account():
 
 # ─── Live-Account Snapshot ──────────────────────────────
 #
-# Why this exists: csq swap rewrites the macOS keychain entry for this
-# config dir. The statusline runs in our process, not CC's, so we use a
-# per-CC-process snapshot to know which account is "live" for a given CC.
-# done mid-session updates the keychain and .current-account, but the
-# We detect "new CC process" via .live-pid: if the PID is dead or absent, the
-# status line then displays the wrong account.
-#
-# The fix: stop writing .current-account from swap_to(). Instead, snapshot
-# the keychain → .current-account exactly once per CC process, triggered
-# from the statusline hook. We detect "new CC process" via .live-pid: if
-# the recorded PID is dead or absent, the next snapshot reads the keychain
-# fresh and identifies the account it holds. While the same CC process is
+# Why this exists: the statusline runs in our process, not CC's. To know
+# which account is "live" for a given CC instance, we use a per-CC-process
+# snapshot triggered from the statusline. We detect "new CC process" via
+# .live-pid: if the recorded PID is dead or absent, the next snapshot
+# refreshes the account identity from disk. While the same CC process is
 # alive, the snapshot is a single os.kill probe and a no-op.
 
 
@@ -287,10 +278,9 @@ def csq_account_marker():
 
     Why a separate marker instead of token-matching .credentials.json:
     .credentials.json may be updated by token refresh during a session,
-    to .credentials.json. The new token won't match credentials/N.json
-    anymore, so token-based identification would silently fail. The
-    marker is durable across refreshes because the account number doesn't
-    change just because the token rotates.
+    which would change the access_token and break token-based account
+    identification. The marker is durable across refreshes because the
+    account number doesn't change just because the token rotates.
     """
     config_dir = _config_dir()
     if not config_dir:
@@ -617,10 +607,6 @@ def swap_to(target_account):
 
     No restart required — verified empirically that updating .credentials.json
     is picked up by the running CC instance on its next interaction.
-
-
-
-
     """
     target_account = str(target_account)
     email = get_email(target_account)
@@ -667,7 +653,7 @@ def swap_to(target_account):
         return False
 
     # Write .credentials.json — this is the actual swap. If this fails,
-    # actual swap. If this fails, the swap is a no-op and we report failure.
+    # the swap is a no-op and we report failure.
     if not write_credentials_file(new_creds):
         print(
             f"  Failed to write {config_dir}/.credentials.json — swap aborted.",
@@ -701,7 +687,6 @@ def swap_to(target_account):
     # would otherwise leave the statusline showing the old account until CC
     # restarts. The new credentials are picked up on the next CC interaction
     # regardless of process lifetime.
-
     try:
         live_account_file = Path(config_dir) / ".current-account"
         tmp = live_account_file.with_suffix(".tmp")
