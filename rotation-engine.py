@@ -611,26 +611,27 @@ def swap_to(target_account):
     target_account = str(target_account)
     email = get_email(target_account)
 
-    # Try to reuse existing token if it's still valid (with a 5-minute safety
+    # Try to reuse existing token if it's still valid (with a 1-minute safety
     # buffer). The OAuth refresh endpoint is shared across all accounts on
     # this client_id and gets aggressively throttled by Anthropic — only call
     # it when truly needed.
     cred_file = CREDS_DIR / f"{target_account}.json"
     new_creds = None
+    cached_creds = None  # Existing creds, used as fallback if refresh fails
     if cred_file.exists():
         try:
-            existing = json.loads(cred_file.read_text())
-            oauth = existing.get("claudeAiOauth", {})
+            cached_creds = json.loads(cred_file.read_text())
+            oauth = cached_creds.get("claudeAiOauth", {})
             expires_at = oauth.get("expiresAt", 0)
             now_ms = int(time.time() * 1000)
-            buffer_ms = 5 * 60 * 1000  # 5 minutes
+            buffer_ms = 60 * 1000  # 1 minute
             if oauth.get("accessToken") and expires_at > now_ms + buffer_ms:
                 remaining_min = (expires_at - now_ms) / 60_000
                 print(
                     f"Using cached token for account {target_account} ({email}) — valid {remaining_min:.0f}m",
                     file=sys.stderr,
                 )
-                new_creds = existing
+                new_creds = cached_creds
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -641,8 +642,25 @@ def swap_to(target_account):
         )
         new_creds = refresh_token(target_account)
         if not new_creds:
-            print("  Failed to refresh token", file=sys.stderr)
-            return False
+            # Refresh failed (typically Anthropic throttling the OAuth endpoint).
+            # Fall back to cached creds if we have them — they may be expired,
+            # but Claude Code will refresh them on its own next API call, which
+            # uses different timing and may bypass the throttle. Only fail
+            # outright if we have nothing to fall back to.
+            if cached_creds is not None and cached_creds.get("claudeAiOauth", {}).get(
+                "accessToken"
+            ):
+                print(
+                    f"  Refresh throttled — using cached token (CC will refresh on next API call)",
+                    file=sys.stderr,
+                )
+                new_creds = cached_creds
+            else:
+                print(
+                    f"  Failed to refresh token and no cached credentials available — try again in ~30s, or run: csq login {target_account}",
+                    file=sys.stderr,
+                )
+                return False
 
     config_dir = _config_dir()
     if not config_dir:
