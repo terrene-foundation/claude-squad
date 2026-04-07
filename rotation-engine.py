@@ -450,8 +450,9 @@ def _validate_account(n):
     return s
 
 
-def refresh_token(account_num):
-    """Refresh an account's OAuth token. Returns new token data or None."""
+def refresh_token(account_num, quiet=False):
+    """Refresh an account's OAuth token. Returns new token data or None.
+    If quiet=True, suppresses error output (caller handles messaging)."""
     import urllib.request
     import urllib.error
 
@@ -487,13 +488,15 @@ def refresh_token(account_num):
         data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         err = json.loads(e.read().decode()) if e.code < 500 else {}
-        print(
-            f"  Token refresh failed: {err.get('error', {}).get('message', e.code)}",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"  Token refresh failed: {err.get('error', {}).get('message', e.code)}",
+                file=sys.stderr,
+            )
         return None
     except Exception as e:
-        print(f"  Token refresh error: {e}", file=sys.stderr)
+        if not quiet:
+            print(f"  Token refresh error: {e}", file=sys.stderr)
         return None
 
     access_token = data.get("access_token")
@@ -636,31 +639,29 @@ def swap_to(target_account):
             pass
 
     if new_creds is None:
-        print(
-            f"Refreshing token for account {target_account} ({email})...",
-            file=sys.stderr,
-        )
-        new_creds = refresh_token(target_account)
-        if not new_creds:
+        new_creds = refresh_token(target_account, quiet=True)
+        if new_creds:
+            print(
+                f"Refreshed token for account {target_account} ({email})",
+                file=sys.stderr,
+            )
+        elif cached_creds is not None and cached_creds.get("claudeAiOauth", {}).get(
+            "accessToken"
+        ):
             # Refresh failed (typically Anthropic throttling the OAuth endpoint).
-            # Fall back to cached creds if we have them — they may be expired,
-            # but Claude Code will refresh them on its own next API call, which
-            # uses different timing and may bypass the throttle. Only fail
-            # outright if we have nothing to fall back to.
-            if cached_creds is not None and cached_creds.get("claudeAiOauth", {}).get(
-                "accessToken"
-            ):
-                print(
-                    f"  Refresh throttled — using cached token (CC will refresh on next API call)",
-                    file=sys.stderr,
-                )
-                new_creds = cached_creds
-            else:
-                print(
-                    f"  Failed to refresh token and no cached credentials available — try again in ~30s, or run: csq login {target_account}",
-                    file=sys.stderr,
-                )
-                return False
+            # Fall back to cached creds — CC will handle its own refresh via
+            # 401 retry when the token expires.
+            print(
+                f"Using cached token for account {target_account} ({email}) — OAuth refresh throttled, CC will refresh on next use",
+                file=sys.stderr,
+            )
+            new_creds = cached_creds
+        else:
+            print(
+                f"No valid credentials for account {target_account} — run: csq login {target_account}",
+                file=sys.stderr,
+            )
+            return False
 
     config_dir = _config_dir()
     if not config_dir:
