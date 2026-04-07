@@ -8,13 +8,14 @@ Claude Max has rolling rate limits (5-hour and 7-day windows). Heavy users hit t
 
 ## What Claude Squad does
 
-- **Auto-rotates** when you hit rate limits — refreshes OAuth token, writes to keychain, CC picks up new creds
-- **Per-terminal isolation** — each terminal gets its own keychain entry via `CLAUDE_CONFIG_DIR`, so rotating one terminal doesn't affect others
-- **Shared history & memory** — conversations, projects, and auto-memory are symlinked from `~/.claude`, so `/resume` works across all accounts
-- **Context & cost in statusline** — see `⚡csq #5:jack 5h:42% | ctx:241k 24% | $5.39` at a glance
-- **Smart account picking** — switches to the account with the most available quota
-- **Unlimited accounts** — log in as many accounts as you have (1, 7, 20 — no cap)
-- **Profile overlays** — start a terminal with a different API provider via `csq run N -p mm` (overlays merge over the canonical default)
+- **In-place account swap** — `! csq swap N` from inside CC switches the current terminal to account N without restart, in the same conversation. CC picks up the new credentials on its next API call.
+- **Per-terminal isolation** — each terminal runs with its own `CLAUDE_CONFIG_DIR`, so swapping one terminal doesn't affect others. 15+ concurrent csq terminals work without contention.
+- **Shared history & memory** — conversations, projects, and auto-memory are symlinked from `~/.claude`, so `/resume` works across all accounts.
+- **Context & cost in statusline** — see `⚡csq #5:jack 5h:42% | ctx:241k 24% | $5.39` at a glance.
+- **Quota visibility** — `csq status` shows all accounts with 5h and 7d usage, so you can pick the one with most capacity.
+- **Unlimited accounts** — log in as many accounts as you have (1, 7, 20 — no cap).
+- **Profile overlays** — start a terminal with a different API provider via `csq run N -p mm` (overlays deep-merge onto the canonical default settings).
+- **Cross-platform** — macOS, Linux, WSL, and Windows (via Git Bash). Tested in CI on all three.
 
 ## Install
 
@@ -29,6 +30,8 @@ git clone https://github.com/terrene-foundation/claude-squad.git
 cd claude-squad
 bash install.sh
 ```
+
+The installer auto-detects your platform (macOS / Linux / WSL / Git Bash) and configures the right credential storage and package manager hints. Windows users run the same command from Git Bash (which Claude Code already requires).
 
 ## Quick start
 
@@ -161,39 +164,45 @@ Files that stay isolated per config dir:
 - `.claude.json` — onboarding state
 - `settings.json` — fresh snapshot built from `~/.claude/settings.json` plus optional `-p` overlay
 
-### Auto-rotation flow
+### Statusline data flow
 
 ```
-Statusline fires (each prompt)
+Statusline fires (each render)
   → Feeds rate_limits JSON to rotation engine
-  → Engine updates per-account quota in quota.json
-  → If 5h usage >= 100% AND CLAUDE_CONFIG_DIR is set:
-      → Pick best available account (lowest usage)
-      → Refresh that account's OAuth token
-      → Write new creds to THIS terminal's keychain entry
-      → CC picks up new account on next API call
+  → Engine updates per-account quota in quota.json (stale-data protection
+    via .quota-cursor — only writes when CC has actually made an API call
+    on the current account, not when stale rate_limits leak through after
+    a swap)
+  → Engine back-syncs the live .credentials.json to credentials/N.json
+    (content-matched by refresh token, race-proof) so a future swap from
+    another terminal sees the latest tokens
 ```
 
-The auto-rotate hook also fires on `UserPromptSubmit` as a backup trigger.
+### Manual swap, not auto-rotate
 
-### Token refresh
+csq does **not** silently change accounts. Auto-rotate was removed because
+CC's statusline JSON still contains the previous account's `rate_limits`
+right after a swap, which made auto-rotate fire on stale data and thrash
+between accounts. Users now read the statusline (which shows quota for all
+accounts) and manually swap with `! csq swap N` when they want to switch.
 
-The engine refreshes OAuth tokens via the public OAuth refresh endpoint:
+### Credential storage
 
-- Endpoint: `platform.claude.com/v1/oauth/token`
-- Grant type: `refresh_token`
-- Stored refresh tokens last ~1 year
+- **macOS**: per-config-dir keychain entry (`Claude Code-credentials-{sha256(dir)[:8]}`) with file fallback
+- **Linux / WSL / Windows**: file-only (`.credentials.json` in the per-config-dir)
 
-No browser needed after initial setup.
+csq writes cached credentials directly during swap and never calls the OAuth
+refresh endpoint itself. CC handles its own token refresh on its next API
+call. This avoids hammering Anthropic's per-client-id refresh throttle.
 
 ## Files
 
-| File                  | Installed to          | Purpose                                                    |
-| --------------------- | --------------------- | ---------------------------------------------------------- |
-| `rotation-engine.py`  | `~/.claude/accounts/` | Core engine: quota tracking, token refresh, keychain write |
-| `csq`                 | `~/.local/bin/`       | CLI: login, run, status, suggest, swap, profile overlays   |
-| `statusline-quota.sh` | `~/.claude/accounts/` | Statusline hook: feeds quota to engine, shows account + %  |
-| `auto-rotate-hook.sh` | `~/.claude/accounts/` | UserPromptSubmit hook: triggers rotation at 100%           |
+| File                  | Installed to          | Purpose                                                                         |
+| --------------------- | --------------------- | ------------------------------------------------------------------------------- |
+| `rotation-engine.py`  | `~/.claude/accounts/` | Core engine: quota tracking, in-place swap, credential back-sync                |
+| `csq`                 | `~/.local/bin/`       | CLI: login, run, status, suggest, swap, cleanup, profile overlays               |
+| `statusline-quota.sh` | `~/.claude/accounts/` | Statusline hook: feeds quota to engine, shows account + %                       |
+| `auto-rotate-hook.sh` | `~/.claude/accounts/` | UserPromptSubmit hook (currently disabled — see "Manual swap, not auto-rotate") |
 
 ### Data files
 
@@ -207,19 +216,62 @@ No browser needed after initial setup.
 
 ## Requirements
 
-- macOS (uses macOS Keychain)
-- Claude Code CLI
-- Python 3
-- jq
-- One or more Claude accounts (single-account mode is fully supported; rotation needs ≥2)
+| Platform           | Shell    | Credential storage         | Other          |
+| ------------------ | -------- | -------------------------- | -------------- |
+| macOS              | bash     | macOS Keychain + file      | Python 3, jq\* |
+| Linux              | bash     | file (`.credentials.json`) | Python 3, jq\* |
+| WSL                | bash     | file (`.credentials.json`) | Python 3, jq\* |
+| Windows (Git Bash) | Git Bash | file (`.credentials.json`) | Python 3, jq\* |
+
+\*jq is optional — without it the statusline simply doesn't show quota; everything else works.
+
+Claude Code is required on every platform. On Windows, Git for Windows ships Git Bash, which CC already needs — no extra install.
+
+You also need one or more Claude accounts. Single-account mode is fully supported; multi-account swap needs ≥2.
+
+## Use in VS Code
+
+The VS Code Claude Code extension reads the same `~/.claude/settings.json` that csq writes, so the statusline and `! csq swap N` should both work in VS Code's Claude Code panel. **However**, VS Code has known issues with hooks (Anthropic issues #16114, #18547, #28774) — the statusline may not always render and notification hooks may not fire. If you rely on the statusline or auto-features, run csq from a terminal CC session for the most reliable experience. The core swap functionality (`! csq swap N`) is a shell command and works regardless of hook reliability.
+
+No VS Code extension or plugin is needed. Install csq once via the regular installer; VS Code picks it up automatically.
 
 ## Uninstall
+
+### macOS / Linux / WSL
 
 ```bash
 rm -rf ~/.claude/accounts
 rm ~/.local/bin/csq          # or ~/bin/csq
 # Remove hooks and statusLine from ~/.claude/settings.json
 ```
+
+### Windows (Git Bash)
+
+**IMPORTANT**: On Windows, csq creates directory junctions inside `config-N/` directories. Plain `rm -rf` follows junctions and deletes the TARGET contents (your real `~/.claude/projects/`, `~/.claude/sessions/`, etc.). Remove the junctions first:
+
+```bash
+# Remove junctions inside config-N before removing the parent
+for d in ~/.claude/accounts/config-*/; do
+    for item in "$d"*; do
+        [ -L "$item" ] && rm "$item"
+    done
+done
+rm -rf ~/.claude/accounts
+rm ~/.local/bin/csq
+# Remove hooks and statusLine from ~/.claude/settings.json
+```
+
+## Troubleshooting
+
+**`csq swap` says swap succeeded but CC shows "rate limited"** — the access token in `credentials/N.json` may be in a stuck state on Anthropic's side (invalidated, flagged, or revoked). Run `csq login N` to capture a fresh token via a full OAuth flow.
+
+**`python3` not found on Windows** — Windows Python registers as `python` or `py`. The installer detects this automatically. If it fails, install Python 3 from python.org (check "Add to PATH").
+
+**Symlinks fail on Windows** — csq uses directory junctions (`mklink /J`) on Windows, which don't need admin privileges. If junction creation fails, csq falls back to copying. For full symlink support, enable Developer Mode in Windows Settings.
+
+**Statusline shows wrong account number** — usually means a stale cache. `csq cleanup` removes stale PID cache files, then run `csq status` to refresh.
+
+**Auto-rotate is disabled** — csq does NOT silently swap accounts behind your back. Auto-rotation was removed because it triggered on stale `rate_limits` data after manual swaps. Use `! csq swap N` when you want to switch.
 
 ## License
 
