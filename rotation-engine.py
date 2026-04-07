@@ -602,23 +602,25 @@ def write_credentials_file(creds):
 
 
 def swap_to(target_account):
-    """Swap this terminal to target account.
+    """Swap this terminal to target account — works in-place, no restart.
 
     Reuses the existing access token if still valid; only refreshes when
-    expired. Writes ONLY per-config-dir state — never the macOS keychain —
-    so 15+ concurrent csq terminals don't contend on a global resource.
+    expired. Writes per-config-dir state for THIS terminal so 15+ concurrent
+    csq terminals don't contend on a global resource.
 
     Files written (all under <CLAUDE_CONFIG_DIR>/):
       .credentials.json    OAuth creds — picked up by CC on next interaction
       .csq-account         account number marker (durable across refreshes)
+      .current-account     statusline display — written directly to bypass
+                           the PID-gated snapshot
+    Plus the per-config-dir keychain entry (best-effort; failures non-fatal).
 
-    IMPORTANT: Does NOT touch .current-account. The snapshot owns that file.
-    If a CC process is already running for this CLAUDE_CONFIG_DIR, its
-    OAuth credentials are loaded from .credentials.json when CC starts.
-    its startup time — rewriting either file now will not affect the
-    running process. CC must be restarted for the swap to take effect. We
-    detect that situation and print a clear warning so the user isn't
-    fooled by a status line that promotes the new marker prematurely.
+    No restart required — verified empirically that updating .credentials.json
+    is picked up by the running CC instance on its next interaction.
+
+
+
+
     """
     target_account = str(target_account)
     email = get_email(target_account)
@@ -695,45 +697,26 @@ def swap_to(target_account):
             file=sys.stderr,
         )
 
-    # If a CC process is already running with this config dir, neither file
-    # rewrite affects the active session. Warn the user so they know to
-    # restart CC.
-    stale_cc = False
-    pid_file = Path(config_dir) / ".live-pid"
-    live_account_file = Path(config_dir) / ".current-account"
-    try:
-        if pid_file.exists():
-            live_pid = pid_file.read_text().strip()
-            if live_pid and _is_pid_alive(live_pid):
-                live_account = ""
-                if live_account_file.exists():
-                    try:
-                        live_account = live_account_file.read_text().strip()
-                    except OSError:
-                        pass
-                if live_account and live_account != target_account:
-                    stale_cc = True
-                    print(
-                        f"\n  WARNING: CC process {live_pid} in this config dir is still using account {live_account}.",
-                        file=sys.stderr,
-                    )
-                    print(
-                        f"  .credentials.json and .csq-account now point at account {target_account}, but CC won't pick it up until restart.",
-                        file=sys.stderr,
-                    )
-    except OSError:
-        pass
+    # Write .current-account directly — bypasses the PID-gated snapshot which
+    # would otherwise leave the statusline showing the old account until CC
+    # restarts. The new credentials are picked up on the next CC interaction
+    # regardless of process lifetime.
 
-    if stale_cc:
+    try:
+        live_account_file = Path(config_dir) / ".current-account"
+        tmp = live_account_file.with_suffix(".tmp")
+        tmp.write_text(target_account)
+        tmp.rename(live_account_file)
+    except OSError as e:
         print(
-            f"Swapped to account {target_account} ({email}) — restart CC to activate.",
+            f"  WARNING: failed to update {config_dir}/.current-account: {e}",
             file=sys.stderr,
         )
-    else:
-        print(
-            f"Swapped to account {target_account} ({email})",
-            file=sys.stderr,
-        )
+
+    print(
+        f"Swapped to account {target_account} ({email}) — next API call will use new credentials",
+        file=sys.stderr,
+    )
     return True
 
 

@@ -33,16 +33,15 @@ if [[ -f "$(dirname "$0")/rotation-engine.py" ]]; then
     cp "$SRC/csq" "$BIN_DIR/csq"
     cp "$SRC/auto-rotate-hook.sh" "$ACCOUNTS_DIR/auto-rotate-hook.sh"
     cp "$SRC/statusline-quota.sh" "$ACCOUNTS_DIR/statusline-quota.sh"
-    mkdir -p "$HOME/.claude/commands"
-    cp "$SRC/rotate.md" "$HOME/.claude/commands/rotate.md" 2>/dev/null || true
 else
     curl -sfL "$REPO_URL/rotation-engine.py" -o "$ACCOUNTS_DIR/rotation-engine.py"
     curl -sfL "$REPO_URL/csq" -o "$BIN_DIR/csq"
     curl -sfL "$REPO_URL/auto-rotate-hook.sh" -o "$ACCOUNTS_DIR/auto-rotate-hook.sh"
     curl -sfL "$REPO_URL/statusline-quota.sh" -o "$ACCOUNTS_DIR/statusline-quota.sh"
-    mkdir -p "$HOME/.claude/commands"
-    curl -sfL "$REPO_URL/rotate.md" -o "$HOME/.claude/commands/rotate.md" 2>/dev/null || true
 fi
+
+# Remove obsolete /rotate slash command from any prior install
+rm -f "$HOME/.claude/commands/rotate.md" 2>/dev/null || true
 
 chmod +x "$ACCOUNTS_DIR/rotation-engine.py" "$BIN_DIR/csq" \
          "$ACCOUNTS_DIR/auto-rotate-hook.sh" "$ACCOUNTS_DIR/statusline-quota.sh"
@@ -102,7 +101,7 @@ echo "  csq run 1           Start CC on account 1 (isolated)"
 echo "  csq run 3           Start CC on account 3 (separate terminal)"
 echo "  csq status          Show all accounts + quota"
 echo ""
-echo "When rate limited:"
-echo "  /rotate              Auto-switches (if started via csq run)"
-echo "  csq suggest          Shows which account to switch to"
+echo "When rate limited (inside CC):"
+echo "  ! csq swap N         Swap THIS terminal to account N (no restart, same conversation)"
+echo "  ! csq suggest        Show which account has the most quota"
 echo ""

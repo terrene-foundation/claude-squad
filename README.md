@@ -80,20 +80,17 @@ Each terminal survives reboots. The account assignment persists because the keyc
 
 ### When rate limited
 
-If started via `csq run` (has `CLAUDE_CONFIG_DIR`):
+Inside the rate-limited CC session, type:
 
 ```
-/rotate       # auto-swaps to best available account
-/rotate 3     # swap to a specific account (account 3)
+!csq swap 3       # swap THIS terminal to account 3
 ```
 
-Both refresh the target account's token and write to THIS terminal's keychain entry. CC picks up the new creds on the next API call — no restart, no other terminals affected.
+The `!` prefix runs the command as a local shell op — no LLM call needed, so it works even when CC is rate-limited. The next message you send in CC will automatically use account 3's token, in the same conversation, no restart.
 
-If started without `csq run`:
+This works because Claude Code picks up updates to `.credentials.json` on its next interaction. `swap_to()` updates the file and the per-config-dir keychain entry, so the swap takes effect right away. Verified empirically.
 
-```
-/rotate       # suggests which account to switch to, you run /login <email>
-```
+If you want to know which account to swap to, run `!csq suggest` first.
 
 ### From terminal
 
@@ -197,7 +194,6 @@ No browser needed after initial setup.
 | `csq`                 | `~/.local/bin/`       | CLI: login, run, status, suggest, swap, profile overlays   |
 | `statusline-quota.sh` | `~/.claude/accounts/` | Statusline hook: feeds quota to engine, shows account + %  |
 | `auto-rotate-hook.sh` | `~/.claude/accounts/` | UserPromptSubmit hook: triggers rotation at 100%           |
-| `rotate.md`           | `~/.claude/commands/` | `/rotate` slash command                                    |
 
 ### Data files
 
@@ -222,7 +218,6 @@ No browser needed after initial setup.
 ```bash
 rm -rf ~/.claude/accounts
 rm ~/.local/bin/csq          # or ~/bin/csq
-rm ~/.claude/commands/rotate.md
 # Remove hooks and statusLine from ~/.claude/settings.json
 ```
 

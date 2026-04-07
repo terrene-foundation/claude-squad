@@ -22,9 +22,12 @@ cmd_login() {
   local config_dir="$ACCOUNTS_DIR/config-$n"
   mkdir -p "$config_dir" "$ACCOUNTS_DIR/credentials"
 
-  # Launch CC login with the account's config dir — opens browser
+  # Launch CC login with the account's config dir — opens browser.
+  # NOTE: Do NOT wrap with `timeout` — it kills the TTY, preventing
+  # claude auth login from detecting an interactive session and opening
+  # the browser. The user can ctrl-C if needed.
   echo "Opening browser to log in for account $n..."
-  timeout 300 env CLAUDE_CONFIG_DIR="$config_dir" claude auth login || die "Login timed out or failed"
+  env CLAUDE_CONFIG_DIR="$config_dir" claude auth login || die "Login failed"
 
   # After login, get email from the new session
   local email
@@ -192,10 +195,36 @@ cmd_run() {
   done
 
   # --- Account-specific setup (per-config-dir, no global state) ---
-  # CC v2.1+ reads .credentials.json at startup. This is the source of truth
-  # for CC's loaded account. Copy it freshly on every csq run so the next
-  # CC restart picks up the canonical credentials/N.json (which refresh_token
-  # keeps current).
+  # Back-sync: if CC refreshed tokens during a previous session, .credentials.json
+  # has newer tokens than credentials/N.json. Copy them back BEFORE we overwrite,
+  # so the canonical file stays current. Without this, csq run overwrites fresh
+  # CC-refreshed tokens with stale ones → 401 on next startup.
+  if [[ -f "$config_dir/.credentials.json" ]]; then
+    CSQ_CANONICAL="$cred_file" CSQ_LIVE="$config_dir/.credentials.json" python3 -c "
+import json, os, sys
+canonical = os.environ['CSQ_CANONICAL']
+live = os.environ['CSQ_LIVE']
+try:
+    with open(canonical) as f: c = json.load(f)
+    with open(live) as f: l = json.load(f)
+    c_exp = c.get('claudeAiOauth', {}).get('expiresAt', 0)
+    l_exp = l.get('claudeAiOauth', {}).get('expiresAt', 0)
+    l_rt = l.get('claudeAiOauth', {}).get('refreshToken', '')
+    c_rt = c.get('claudeAiOauth', {}).get('refreshToken', '')
+    # If live has a newer token or different refresh token, back-sync
+    if l_exp > c_exp or (l_rt and l_rt != c_rt):
+        import shutil, stat
+        tmp = canonical + '.tmp'
+        with open(tmp, 'w') as f: json.dump(l, f, indent=2)
+        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(tmp, canonical)
+except Exception:
+    pass  # Non-fatal — proceed with whatever canonical has
+" 2>/dev/null
+  fi
+
+  # CC v2.1+ reads .credentials.json at startup. Copy from canonical so
+  # swap_to() changes take effect on restart.
   cp "$cred_file" "$config_dir/.credentials.json"
   chmod 600 "$config_dir/.credentials.json"
 
@@ -355,6 +384,12 @@ csq — Claude Squad account manager
   csq suggest                    Suggest which account to /login to
   csq cleanup                    Remove stale PID cache files
   csq help                       This message
+
+When CC hits a rate limit, type inside CC:
+  ! csq swap <N>                 Swap to account N. Works even when CC's LLM is
+                                 rate-limited (the ! prefix runs as a local
+                                 shell command, no LLM call). Your next message
+                                 will use the new account, in the same conversation.
 
 Settings model:
   ~/.claude/settings.json is the canonical default. csq NEVER mutates it.

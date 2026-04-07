@@ -23,7 +23,6 @@ rotation-engine.py       — Core engine: quota tracking, token refresh, keychai
 statusline-quota.sh      — Statusline hook: feeds quota to engine, shows account + %
 csq                      — CLI: csq login/run/status/suggest/use
 auto-rotate-hook.sh      — UserPromptSubmit hook: triggers rotation at 100% (requires CLAUDE_CONFIG_DIR)
-rotate.md                — /rotate skill: auto-swaps or suggests /login
 install.sh               — One-time installer
 ```
 
