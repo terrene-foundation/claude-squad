@@ -2,30 +2,19 @@
 /**
  * Hook: user-prompt-rules-reminder
  * Event: UserPromptSubmit
- * Purpose: Inject critical rules into conversation on EVERY user message.
- *          This is the PRIMARY mechanism that survives context compression,
- *          because it runs fresh on every turn (independent of memory).
+ * Purpose: Inject a small, claude-squad-relevant context block on every
+ *          user turn. Survives context compression because it runs fresh.
  *
- * Framework-agnostic — works with any Kailash project.
+ * Scope: claude-squad. No LLM model/env discovery (csq is not an LLM
+ * framework). No workspace/session-note scanning unless workspaces/ exists.
  *
- * Exit Codes:
- *   0 = success (continue)
+ * Exit codes: 0 always (never blocks the turn).
  */
 
 const fs = require("fs");
 const path = require("path");
-const {
-  parseEnvFile,
-  discoverModelsAndKeys,
-  buildCompactSummary,
-  ensureEnvFile,
-} = require("./lib/env-utils");
-const {
-  buildWorkspaceSummary,
-  findAllSessionNotes,
-} = require("./lib/workspace-utils");
 
-const TIMEOUT_MS = 3000;
+const TIMEOUT_MS = 2000;
 const timeout = setTimeout(() => {
   console.log(JSON.stringify({ continue: true }));
   process.exit(0);
@@ -49,119 +38,33 @@ process.stdin.on("end", () => {
 
 function buildReminder(data) {
   const cwd = data.cwd || process.cwd();
-  const userMessage = (data.tool_input?.user_message || "").toLowerCase();
-
-  // ── Always inject env summary (brief, 1-2 lines) ─────────────────
-  const envPath = path.join(cwd, ".env");
-  let envSummary = "No .env found";
-  let failures = [];
-
-  if (fs.existsSync(envPath)) {
-    const env = parseEnvFile(envPath);
-    const discovery = discoverModelsAndKeys(env);
-    envSummary = buildCompactSummary(env, discovery);
-    failures = discovery.validations.filter((v) => v.status === "MISSING_KEY");
-  } else {
-    // Try to create .env
-    ensureEnvFile(cwd);
-  }
-
-  // ── Build the reminder lines ──────────────────────────────────────
   const lines = [];
 
-  // Line 1: Always show model/key status (compressed, 1 line)
-  lines.push(`[ENV] ${envSummary}`);
-
-  // Line 2: If there are failures, highlight them
-  if (failures.length > 0) {
-    lines.push(
-      `[ENV] CRITICAL: ${failures.length} model(s) missing API keys — LLM calls will fail!`,
-    );
-  }
-
-  // Line 3: Zero-tolerance behavioral rules (always present, survives compression)
+  // Single zero-tolerance line. Survives compaction.
   lines.push(
-    "[ZERO-TOLERANCE] " +
-      "Pre-existing failures MUST be FIXED, not reported. " +
-      "Stubs/TODOs/placeholders are BLOCKED — implement fully or remove. " +
-      "No naive fallbacks hiding errors. " +
-      "No workarounds for SDK bugs — deep dive, reproduce, file GitHub issue. " +
-      "Never hardcode models/keys. " +
-      "Create missing records (god-mode). " +
-      "Implement gaps, don't document them.",
+    "[ZERO-TOLERANCE] Fix pre-existing failures, don't report them. " +
+      "No stubs/TODOs/placeholders. No silent error fallbacks. " +
+      "No workarounds for upstream bugs — reproduce, document, file upstream.",
   );
 
-  // Line 4: Workspace context (survives compaction — primary anti-amnesia mechanism)
-  try {
-    const wsSummary = buildWorkspaceSummary(cwd);
-    if (wsSummary) {
-      lines.push(`[WORKSPACE] ${wsSummary}`);
-    }
-  } catch {}
-
-  // ── Session notes (critical for continuity across sessions) ───────
-  try {
-    const allNotes = findAllSessionNotes(cwd);
-    if (allNotes.length === 1) {
-      const note = allNotes[0];
-      const staleTag = note.stale ? " (STALE — verify before acting)" : "";
-      const label = note.workspace ? `[${note.workspace}]` : "[root]";
-      lines.push(
-        `[SESSION-NOTES] ${label} Read ${note.relativePath} before starting work${staleTag} — updated ${note.age}`,
-      );
-    } else if (allNotes.length > 1) {
-      const parts = allNotes.map((note) => {
-        const label = note.workspace || "root";
-        const staleTag = note.stale ? " STALE" : "";
-        return `${label} (${note.age}${staleTag})`;
-      });
-      lines.push(
-        `[SESSION-NOTES] ${allNotes.length} workspaces with notes — pick one to continue: ${parts.join(" | ")}`,
-      );
-    }
-  } catch {}
-
-  // ── Contextual reminders based on user message content ────────────
-  const llmKeywords = [
-    "model",
-    "llm",
-    "agent",
-    "gpt",
-    "claude",
-    "gemini",
-    "openai",
-    "anthropic",
-    "api key",
-    "shadow agent",
-    "objective",
+  // Session notes, only if present (no expensive scanning).
+  const sessionNotePaths = [
+    path.join(cwd, "SESSION_NOTES.md"),
+    path.join(cwd, ".session-notes.md"),
   ];
-  const e2eKeywords = [
-    "e2e",
-    "test",
-    "playwright",
-    "validate",
-    "red-team",
-    "persona",
-    "rbac",
-    "login",
-  ];
-
-  const mentionsLLM = llmKeywords.some((kw) => userMessage.includes(kw));
-  const mentionsE2E = e2eKeywords.some((kw) => userMessage.includes(kw));
-
-  if (mentionsLLM) {
-    lines.push(
-      "[REMINDER] Read model name from .env (OPENAI_PROD_MODEL or equivalent). " +
-        "Read API key from .env. NEVER hardcode.",
-    );
-  }
-
-  if (mentionsE2E) {
-    lines.push(
-      "[REMINDER] God-mode E2E: Create ALL missing records. " +
-        "Adapt to data changes. Assume correct role. " +
-        "If endpoint missing, implement it.",
-    );
+  for (const p of sessionNotePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const stat = fs.statSync(p);
+        const ageMs = Date.now() - stat.mtimeMs;
+        const ageStr = formatAge(ageMs);
+        const stale = ageMs > 24 * 3600 * 1000 ? " (STALE)" : "";
+        lines.push(
+          `[SESSION-NOTES] ${path.basename(p)} updated ${ageStr}${stale} — read before starting`,
+        );
+        break;
+      } catch {}
+    }
   }
 
   return {
@@ -172,4 +75,13 @@ function buildReminder(data) {
       message: lines.join("\n"),
     },
   };
+}
+
+function formatAge(ms) {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }

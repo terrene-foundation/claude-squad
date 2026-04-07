@@ -1,146 +1,84 @@
 # Security Rules
 
 ## Scope
-These rules apply to ALL code changes in the repository.
+
+Applies to all code in claude-squad, with particular attention to the
+OAuth credential flow, keychain writes, and atomic file handling in
+`rotation-engine.py` and `csq`.
 
 ## MUST Rules
 
 ### 1. No Hardcoded Secrets
-All sensitive data MUST use environment variables.
 
-**Detection Patterns**:
-```
-❌ api_key = "sk-..."
-❌ password = "admin123"
-❌ AWS_SECRET_ACCESS_KEY = "..."
-❌ DATABASE_URL = "postgres://user:pass@..."
-```
+Credentials, tokens, and keys must come from the environment, `.env`, or
+the OAuth flow. Never committed literals.
 
-**Correct Pattern**:
 ```
-✅ api_key = os.environ.get("API_KEY")
-✅ password = os.environ["DB_PASSWORD"]
-✅ from dotenv import load_dotenv; load_dotenv()
+BAD:  api_key = "sk-ant-..."
+GOOD: api_key = os.environ["ANTHROPIC_API_KEY"]
 ```
 
-**Enforced by**: security-reviewer agent, pre-commit hook
-**Violation**: BLOCK commit
+### 2. No Secrets in Logs or Error Messages
 
-### 2. Parameterized Queries
-All database queries MUST use parameterized queries or ORM.
+Access tokens, refresh tokens, and keychain payloads must NOT be logged.
+Print prefixes/suffixes only when diagnostics need them:
 
-**Detection Patterns**:
 ```
-❌ f"SELECT * FROM users WHERE id = {user_id}"
-❌ "DELETE FROM users WHERE name = '" + name + "'"
+BAD:  print(f"token: {access_token}")
+GOOD: print(f"token: {access_token[:8]}...{access_token[-4:]}")
 ```
 
-**Correct Pattern**:
-```
-✅ "SELECT * FROM users WHERE id = %s", (user_id,)
-✅ cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-✅ User.query.filter_by(id=user_id)  # ORM
-```
+### 3. Input Validation on Account Numbers
 
-**Enforced by**: security-reviewer agent
-**Violation**: BLOCK commit
+Any value destined for `credentials/{N}.json`, config-dir path construction,
+or keychain service name MUST be validated via `_validate_account()`
+(range 1..MAX_ACCOUNTS, digits only). This blocks path traversal and
+keychain-namespace injection.
 
-### 3. Input Validation
-All user input MUST be validated before use.
+### 4. Atomic Writes for Credential Files
 
-**Applies to**:
-- API endpoints
-- CLI inputs
-- File uploads
-- Form submissions
+`.credentials.json`, `credentials/N.json`, and marker files (`.csq-account`,
+`.current-account`, `.quota-cursor`) MUST be written via `_atomic_replace`
+(temp file → `os.replace`). Partial writes during a crash must not corrupt
+a running CC's credential state.
 
-**Required Validations**:
-- Type checking
-- Length limits
-- Format validation (email, URL, etc.)
-- Whitelist when possible
+### 5. File Permissions on Credential Files
 
-**Enforced by**: security-reviewer agent
-**Violation**: HIGH priority fix
+After writing a credential file, call `_secure_file()` to set `0o600`.
+On Windows, this is a no-op (handled by the filesystem ACL default).
 
-### 4. Output Encoding
-All user-generated content MUST be encoded before display.
+### 6. Fail-Closed on Keychain/Lock Contention
 
-**Applies to**:
-- HTML templates
-- JSON responses
-- Log output
-
-**Detection Patterns**:
-```
-❌ element.innerHTML = userContent
-❌ dangerouslySetInnerHTML={{ __html: userContent }}
-```
-
-**Correct Pattern**:
-```
-✅ element.textContent = userContent
-✅ DOMPurify.sanitize(userContent)
-✅ html.escape(userContent)
-```
-
-**Enforced by**: security-reviewer agent
-**Violation**: HIGH priority fix
+Keychain writes (`security add-generic-password`) and file locks can hang
+under concurrent load. Every call that touches them MUST use a short
+timeout (3 seconds) and fall through safely. Never block a statusline
+render waiting for the keychain.
 
 ## MUST NOT Rules
 
-### 1. No eval() on User Input
-MUST NOT use eval(), exec(), or similar on user-controlled data.
+### 1. No `shell=True` on User-Influenced Input
 
-**Detection Patterns**:
-```
-❌ eval(user_input)
-❌ exec(user_code)
-❌ subprocess.call(user_command, shell=True)
-```
+`subprocess.run([...])` with an array — never `shell=True` with string
+interpolation. Path components must never reach a shell.
 
-**Consequence**: BLOCK commit
+### 2. No `.env` or `credentials/` in Git
 
-### 2. No Secrets in Logs
-MUST NOT log sensitive data (passwords, tokens, PII).
+`.gitignore` MUST list:
 
-**Detection Patterns**:
-```
-❌ logger.info(f"User logged in with password: {password}")
-❌ print(f"API key: {api_key}")
-```
+- `.env`
+- `credentials/`
+- `config-*/`
+- `.credentials.json`
 
-**Consequence**: CRITICAL fix required
+If any of these were ever committed, history rewrite is required.
 
-### 3. No .env in Git
-MUST NOT commit .env files to version control.
+### 3. No Global Keychain Writes Under User-Supplied Service Names
 
-**Required**:
-- .env in .gitignore
-- .env.example for templates (no real values)
+The keychain service name is derived from the hashed config dir path via
+`_keychain_service()`. Never accept a service name from CLI or env input
+directly.
 
-**Consequence**: History rewrite required if committed
+## Cross-References
 
-## Kailash-Specific Security
-
-### DataFlow Models
-- Use proper access controls on models
-- Validate inputs at model level
-- Never expose internal IDs directly
-
-### Nexus Endpoints
-- Authentication on all protected routes
-- Rate limiting enabled
-- CORS properly configured
-
-### Kaizen Agents
-- Prompt injection protection
-- Sensitive data filtering in prompts
-- Output validation
-
-## Exceptions
-Security exceptions require:
-1. Written justification
-2. Approval from security-reviewer
-3. Documentation in security review
-4. Time-limited (must be remediated)
+- `no-stubs.md` — no silent fallbacks that hide security errors
+- `zero-tolerance.md` — pre-existing security issues must be fixed

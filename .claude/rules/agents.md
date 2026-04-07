@@ -1,137 +1,46 @@
 # Agent Orchestration Rules
 
 ## Scope
-These rules govern when and how specialized agents MUST be used.
 
-## RECOMMENDED Delegations
+These rules govern when and how specialized agents are used in claude-squad.
 
-### Rule 1: Code Review After ANY Change
-After completing ANY file modification (Edit, Write), it is RECOMMENDED to:
-1. Delegate to **intermediate-reviewer** for code review
-2. Wait for review completion before proceeding
-3. Address any findings before moving to next task
+## Recommended Delegations
 
-**Note**: Users may skip code review at their discretion.
+### Code Review After Changes
 
-**Enforced by**: PostToolUse hook reminder
-**Exception**: User explicitly says "skip review"
+After file modifications (Edit, Write), delegating to a code-review agent
+is recommended when the change is non-trivial. Users may skip for trivial
+edits or when explicitly told to.
 
-### Rule 2: Security Review Before ANY Commit
-Before executing ANY git commit command, it is RECOMMENDED to:
-1. Delegate to **security-reviewer** for security audit
-2. Address all CRITICAL findings
-3. Document any HIGH findings for tracking
+### Security Review Before Commits
 
-**Enforced by**: PreToolUse hook on git commit
-**Note**: Security review is strongly recommended but users may skip when appropriate.
+Before `git commit` on security-sensitive changes (OAuth flow, keychain
+writes, atomic file handling), a security review is strongly recommended.
 
-### Rule 3: Framework Specialist for Framework Work
-When working with Kailash frameworks, you MUST consult:
-- **dataflow-specialist**: For any database or DataFlow work
-- **nexus-specialist**: For any API or deployment work
-- **kaizen-specialist**: For any AI agent work
-- **mcp-specialist**: For any MCP integration work
-- **pact-specialist**: For any organizational governance work
+### Parallel Execution for Independent Operations
 
-**Applies when**:
-- Creating new workflows
-- Modifying database models
-- Setting up API endpoints
-- Building AI agents
-- Implementing organizational governance
+When multiple independent operations are needed, launch them in parallel
+(e.g., reading several unrelated files, running multiple searches).
 
-**Enforced by**: Framework detection in session-start hook
+### Analysis Chain for Complex Features
 
-### Rule 4: Analysis Chain for Complex Features
-For features requiring design decisions, follow this chain:
-1. **deep-analyst** → Identify failure points
-2. **requirements-analyst** → Break down requirements
-3. **framework-advisor** → Choose implementation approach
-4. Then appropriate specialist for implementation
+For features with unclear requirements or multiple valid approaches:
 
-**Applies when**:
-- New feature spanning multiple files
-- Unclear requirements
-- Multiple valid approaches exist
+1. Identify failure points (deep analysis)
+2. Break down requirements
+3. Choose an approach
+4. Implement
 
-### Rule 5: Parallel Execution for Independent Operations
-When multiple independent operations are needed, you MUST:
-1. Launch agents in parallel using Task tool
-2. Wait for all to complete
-3. Aggregate results
+## MUST Rules
 
-**Example independent operations**:
-- Reading multiple unrelated files
-- Running multiple search queries
-- Validating separate components
+### Zero-Tolerance Enforcement
 
-## Examples
+Pre-existing failures, stubs, naive fallbacks, and error-hiding are BLOCKED.
+See `zero-tolerance.md` and `no-stubs.md`. If you find it, you fix it.
 
-### Correct: Sequential with Review
-```
-✅ User asks for code change
-   → Agent implements change
-   → Agent delegates to intermediate-reviewer
-   → Agent addresses review findings
-   → Only then moves to next task
-```
+## Cross-References
 
-### Incorrect: Skipping Review
-```
-❌ User asks for code change
-   → Agent implements change
-   → Agent moves to next task (skipped review!)
-```
-
-### Rule 6: Pre-Existing Failures MUST Be Fixed
-
-See `rules/zero-tolerance.md` Rule 1. If you find it, you fix it. "Not introduced in this session" is BLOCKED.
-**Exception**: User explicitly says "skip this issue."
-
-### Rule 7: No Workarounds for Core SDK Issues
-
-See `rules/zero-tolerance.md` Rule 4. Deep dive, reproduce, fix directly. NEVER re-implement SDK functionality.
-**Exception**: NONE.
-
-## PROHIBITED Actions
-
-### RECOMMENDED: Code Review
-Code review is recommended after changes.
-
-### RECOMMENDED: Security Review Before Commit
-Security review before commits is strongly recommended.
-
-### MUST NOT: Framework Work Without Specialist
-Never use raw SQL when DataFlow patterns exist.
-Never build custom API when Nexus patterns exist.
-Never build custom agents when Kaizen patterns exist.
-Never build custom governance/access control when PACT patterns exist.
-
-### MUST NOT: Sequential When Parallel Possible
-If operations are independent, run them in parallel.
-
-### MUST NOT: Violate Zero-Tolerance Rules
-
-Stubs, naive fallbacks, unfixed pre-existing failures, and SDK workarounds are all BLOCKED. See `rules/zero-tolerance.md` and `rules/no-stubs.md`.
-
-## Quality Gates
-
-### Checkpoint 1: After Planning
-- [ ] Requirements understood
-- [ ] Approach validated
-- [ ] Framework selected
-
-### Checkpoint 2: After Implementation
-- [ ] Code review completed
-- [ ] Tests written
-- [ ] Patterns validated
-
-### Checkpoint 3: Before Commit
-- [ ] Security review passed
-- [ ] All tests pass
-- [ ] Documentation updated
-
-### Checkpoint 4: Before Push
-- [ ] PR description complete
-- [ ] CI checks configured
-- [ ] Ready for human review
+- `zero-tolerance.md` — what MUST be fixed (not reported)
+- `no-stubs.md` — stub detection and enforcement
+- `security.md` — security review checklist
+- `git.md` — commit and branch workflow
