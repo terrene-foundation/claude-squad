@@ -6,7 +6,7 @@
  * Purpose: Block dangerous commands, suggest tmux for long-running,
  *          ENFORCE .env loading for pytest/python commands
  *
- * Framework-agnostic — works with any Kailash project.
+ * Framework-agnostic — generic Bash safety guard.
  *
  * Exit Codes:
  *   0 = success (continue)
@@ -104,21 +104,19 @@ function validateBashCommand(data) {
     }
   }
 
-  // ====================================================================
-  // ENFORCE: .env loading for pytest/python commands
-  // ====================================================================
+  // Log a test_pattern observation when pytest/python is invoked.
+  // The original Kailash version also added a "REMINDER: pytest .env"
+  // hint that referenced OPENAI_API_KEY — irrelevant for csq, removed.
   const isPytest = /\bpytest\b/.test(command);
   const isPython = /\bpython\b/.test(command) || /\bpython3\b/.test(command);
 
   if (isPytest || isPython) {
-    // Log enriched test pattern observation
     try {
       const testPathMatch = command.match(
         /(?:pytest|python3?\s+-m\s+pytest)\s+([^\s;|&]+)/,
       );
       const testPath = testPathMatch ? testPathMatch[1] : null;
 
-      // Determine test tier from path
       let testTier = "unit";
       if (testPath) {
         if (/e2e|playwright|end.to.end/i.test(testPath)) testTier = "e2e";
@@ -132,33 +130,6 @@ function validateBashCommand(data) {
         command_flags: extractTestFlags(command),
       });
     } catch {}
-
-    // Check if .env exists
-    let envExists = false;
-    try {
-      envExists = fs.existsSync(path.join(cwd, ".env"));
-    } catch {}
-
-    if (envExists) {
-      // Check if command already loads .env (various patterns)
-      const loadsEnv =
-        /dotenv/.test(command) || // pytest-dotenv or dotenv CLI
-        /\.env/.test(command) || // References .env explicitly
-        /OPENAI_API_KEY=/.test(command) || // Explicit env var
-        /--env-file/.test(command) || // Docker-style env file
-        /source\s+\.env/.test(command) || // Shell sourcing
-        /export\s+/.test(command) || // Export pattern
-        /env\s+/.test(command); // env prefix
-
-      if (!loadsEnv && isPytest) {
-        return {
-          continue: true,
-          exitCode: 0,
-          message:
-            "REMINDER: .env exists but pytest may not load it. Consider: pytest-dotenv plugin OR prefix with env vars from .env. OPENAI_API_KEY and model settings are in .env!",
-        };
-      }
-    }
   }
 
   // WARN: Long-running commands outside tmux/background

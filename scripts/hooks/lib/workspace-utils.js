@@ -1,8 +1,7 @@
 /**
  * Shared utility: Workspace detection and phase derivation.
  *
- * Used by session-start.js, user-prompt-rules-reminder.js, and phase commands.
- * Framework-agnostic — works with any Kailash project.
+ * Used by session-start.js, pre-compact.js, stop.js. Framework-agnostic.
  */
 
 const fs = require("fs");

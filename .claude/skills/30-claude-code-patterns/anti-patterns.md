@@ -14,7 +14,7 @@ Common mistakes when creating or modifying Claude Code artifacts, organized by a
 
 **Symptom**: `description: "Helps with development tasks"`
 **Why it's wrong**: Claude cannot reliably select this agent because the trigger is too broad. Every task is a "development task."
-**Fix**: `description: "DataFlow database specialist. Use when implementing database models, CRUD operations, or bulk data processing."`
+**Fix**: `description: "Security vulnerability specialist. Use proactively before commits and for security-sensitive code changes."`
 
 ### 3. Missing Output Format
 

@@ -81,7 +81,5 @@ Your analysis should always include:
 ## Related Agents
 
 - **requirements-analyst**: Hand off for formal requirements breakdown
-- **care-expert**: Consult for CARE governance alignment
-- **eatp-expert**: Consult for trust protocol implications
-- **open-source-strategist**: Consult for licensing and positioning impacts
 - **security-reviewer**: Invoke for sensitive content review
+- **testing-specialist**: Hand off when failure analysis points to missing test coverage

@@ -49,8 +49,8 @@ What remains to be done. Be specific — include file paths, line numbers, exact
 ```markdown
 ### Outstanding
 
-- [ ] `rules/testing.md` missing from USE template — coc-sync Gate 2 should create softened version
-- [ ] 19 BUILD-internal path refs in USE template agents — list: eatp-expert, framework-advisor, ...
+- [ ] `rotation-engine.py:947` — add a retry wrapper around `_atomic_replace` on Windows
+- [ ] Ping-pong guard: document the multi-terminal-same-account scenario in README
 ```
 
 ### Section 4: Oversight Checklist

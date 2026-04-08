@@ -106,28 +106,12 @@ Deploy these agents as a team for each implementation cycle:
 - **intermediate-reviewer** — Code review after every file change (MANDATORY)
 - **todo-manager** — Track progress, update todo status, verify completion with evidence
 
-**Specialist (invoke ONE matching the current todo):**
-
-- **pattern-expert** — Workflow patterns, node configuration
-- **dataflow-specialist** — Database operations (if project uses DataFlow)
-- **nexus-specialist** — API deployment (if project uses Nexus)
-- **kaizen-specialist** — AI agents (if project uses Kaizen)
-- **mcp-specialist** — MCP integration (if project uses MCP)
-
-**Frontend team (when implementing frontend):**
-
-- **uiux-designer** — Design system, visual hierarchy, responsive layouts
-- **react-specialist** or **flutter-specialist** — Framework-specific implementation
-- **ai-ux-designer** — AI interaction patterns (if AI-facing UI)
-- **frontend-developer** — Responsive UI components
-
 **Recovery (invoke when builds break):**
 
 - **build-fix** — Fix build/type errors with minimal changes (NO architectural changes)
 
 **Quality gate (once per todo, before closing):**
 
-- **value-auditor** — Evaluate from user/buyer perspective, not just technical assertions
 - **security-reviewer** — Security audit before any commit (MANDATORY)
 
 ### Journal

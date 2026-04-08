@@ -127,8 +127,6 @@ git push -u origin hotfix/[issue]
 - **testing-specialist**: Full test coverage before commits
 - **security-reviewer**: Security audit before commits (MANDATORY)
 - **gold-standards-validator**: Compliance before release
-- **documentation-validator**: Verify examples work
-- **deployment-specialist**: Production deployment after release
 
 ---
 

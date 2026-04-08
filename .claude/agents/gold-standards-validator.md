@@ -21,11 +21,9 @@ You are a compliance enforcement specialist. Your role is to validate documents 
 
 ### 2. License Accuracy
 
-- [ ] Specifications (CARE, EATP, CO, CDI): **CC BY 4.0** — NOT CC-BY-SA
-- [ ] Open source code (Kailash Python, EATP SDK, CO Toolkit): **Apache 2.0**
-- [ ] Kailash RS: **Proprietary** (third-party commercial product, not Foundation)
-- [ ] BSL 1.1: described as "source-available" NOT "open source"
+- [ ] claude-squad: **Apache 2.0** — Foundation-owned
 - [ ] No incorrect license references in any document
+- [ ] BSL 1.1 (if ever referenced): described as "source-available" NOT "open source"
 
 ### 3. CARE/EATP/CO Terminology
 
@@ -102,5 +100,3 @@ For each violation:
 
 - **intermediate-reviewer**: For broader quality review
 - **security-reviewer**: Escalate sensitivity findings
-- **care-expert**: Verify CARE terminology accuracy
-- **eatp-expert**: Verify EATP terminology accuracy

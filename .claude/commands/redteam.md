@@ -37,32 +37,31 @@ Before any code quality checks, verify **what was specified was actually built**
 
 **A file existing is NOT completion. Real data flowing end-to-end is completion.**
 
-Detection patterns for unwired frontend code:
+Detection patterns for unwired code:
 
-- Functions named `generate*()` or `mock*()` producing synthetic data
-- Constants named `MOCK_*`, `FAKE_*`, `DUMMY_*`, `SAMPLE_*`
-- Hardcoded arrays/objects serving as page data instead of API calls
-- `fetch()` or API calls that are commented out or absent where plans require them
+- Functions that return hardcoded values instead of calling real APIs/system tools
+- Stubs returning `None`/placeholder data where real logic is expected
+- Tests that mock the keychain, file system, or OAuth endpoint — claude-squad bugs are race conditions between REAL processes on REAL files; mocks hide them
 
 ### 2. End-to-end validation
 
-Review implementation with red team agents using playwright mcp (web) and marionette mcp (flutter).
+claude-squad is a CLI tool, not a web/mobile app. There is no Playwright or Marionette surface. End-to-end validation means:
 
-- Test all workflows end-to-end:
-  - Using backend API endpoints only
-  - Using frontend API endpoints only
-  - Using browser via Playwright MCP only
+- Running `test-platform.sh` cross-platform smoke test on the target platform
+- Running multi-terminal concurrency tests that exercise `_lock_file`, `_atomic_replace`, `_is_pid_alive`
+- Manual scenario tests: `csq login`, `csq run`, `csq swap`, `csq status` under realistic load (multiple concurrent `~/.claude/accounts/config-N/` sessions)
 
 ### 3. User flow validation
 
-Ensure red team agents peruse `workspaces/<project>/03-user-flows/` and fully understand the detailed storyboard for each user.
+claude-squad's user flows are command sequences run from a shell. Red team agents should walk through the key flows end-to-end against a fresh test installation:
 
-- Include tests written from user workflow perspectives
-  - Workflows must be extremely detailed
-  - Every step should include: what is seen, what is clicked, what is expected, how to proceed, does it show value
-  - Every transition between steps must be analyzed and evaluated
-- Focus on intent, vision, and user requirements — never naive technical assertions
-- Every action and expectation from user must be evaluated against implementation
+- **First-time setup**: `./install.sh` → `csq login 1` → browser flow → credentials captured
+- **Multi-account**: `csq login 2` through `csq login N` → confirm each lands in `credentials/N.json`
+- **Concurrent sessions**: start N terminals with `csq run M` → confirm each gets isolated `config-M/` and the correct statusline account label
+- **Hot swap**: `! csq swap N` from inside a running CC session → confirm next API call uses the new account
+- **Quota recovery**: drive one account to rate-limit → `csq swap` → confirm new account takes over without corrupting the exhausted account's quota slot
+
+Focus on intent and user requirements — never naive technical assertions. Every action and expectation from the user must be evaluated against the real behavior of `rotation-engine.py` and `csq`.
 
 ### 4. Test-once protocol — do NOT re-run existing tests
 
@@ -109,21 +108,13 @@ Deploy these agents as a red team for validation:
 **Core red team (always):**
 
 - **deep-analyst** — **Step 1 owner**: read every plan in `02-plans/`, compare against codebase, produce `.spec-coverage` report. Also: failure points, edge cases, systemic issues.
-- **testing-specialist** — Verify 3-tier test coverage, Real infrastructure recommended compliance
-- **e2e-runner** — Generate and run Playwright E2E tests (web) or Marionette tests (Flutter)
-- **value-auditor** — Evaluate every page/flow from skeptical enterprise buyer perspective
-- **security-reviewer** — Full security audit across the codebase
+- **testing-specialist** — Verify test coverage (cross-platform smoke suite + inline Python tests against `rotation-engine.py`). Real file locks and real atomic writes only.
+- **security-reviewer** — Full security audit: OAuth flow, keychain writes, atomic file handling, concurrency races, credential path traversal.
 
 **Validation perspectives (deploy selectively based on findings):**
 
-- **coc-expert** — Check methodological compliance: are guardrails in place? Is institutional knowledge captured? Are the three fault lines addressed?
 - **gold-standards-validator** — Compliance check against project standards
 - **intermediate-reviewer** — Code quality review across all changed files
-
-**Frontend validation (if applicable):**
-
-- **uiux-designer** — Audit visual hierarchy, responsive behavior, accessibility
-- **ai-ux-designer** — Audit AI interaction patterns (if AI-facing UI)
 
 ## Convergence Criteria
 

@@ -175,11 +175,9 @@ When auditing artifacts, evaluate on four dimensions:
 
 - **intermediate-reviewer** — General code/artifact review (hand off for non-CC-specific review)
 - **gold-standards-validator** — Terrene naming, licensing compliance
-- **co-expert** — CO methodology questions (principles, layers)
-- **coc-expert** — COC methodology questions (five-layer implementation)
 
 ## Full Documentation
 
 - `.claude/skills/30-claude-code-patterns/` — CC architecture reference
-- `.claude/guides/claude-code/13-agentic-architecture.md` through `16-context-reliability.md` — Architect-level patterns
-- `.claude/guides/co-setup/03-creating-components.md` — Component creation guide
+- `.claude/skills/co-reference/` — CO methodology reference
+- `.claude/skills/28-coc-reference/` — COC methodology reference

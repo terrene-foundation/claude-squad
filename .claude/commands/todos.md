@@ -28,14 +28,17 @@ This phase executes under the **autonomous execution model** (see `rules/autonom
 
 Reference plans in `workspaces/<project>/02-plans/` and work through every single file.
 
-- **(Backend)** Work with framework specialists (kailash, kaizen, dataflow, nexus). Follow procedural directives. Review and revise plans as required.
-- **(Frontend)** Work with frontend agents. Review implementation plans and todos for frontends. Use a consistent set of design principles for all FE interfaces. Use the latest modern UI/UX principles/components/widgets.
+Review plans against claude-squad's architecture constraints: Python stdlib only (no PyPI deps), bash + POSIX tools for the shell layer, cross-platform (macOS/Linux/WSL/Windows). Any plan that requires a new runtime dependency is a non-starter unless justified and approved.
 
-### 2. Codebase locations (project root, not workspace)
+### 2. Codebase locations
 
-- `src/...` for all backend codebase
-- `apps/web` for all web FE codebase
-- `apps/mobile` for all mobile FE codebase
+- `rotation-engine.py` — the core Python engine (quota, OAuth, swap, backsync)
+- `csq` — the bash CLI wrapper
+- `statusline-quota.sh` — the CC statusline hook
+- `install.sh` — one-time installer
+- `test-platform.sh` — cross-platform smoke suite
+- `journal/` — project decisions, discoveries, gaps
+- `workspaces/<project>/` — active workspace with briefs/plans/todos for larger initiatives
 
 ### 3. Create comprehensive todos
 
@@ -74,13 +77,7 @@ Deploy these agents as a team for todo creation:
 - **todo-manager** — Create and organize the detailed todos, ensure completeness
 - **requirements-analyst** — Break down requirements, identify missing tasks
 - **deep-analyst** — Identify failure points, dependencies, and gaps
-- **coc-expert** — Ensure todos include context/guardrails/learning work, not just features (COC five-layer completeness)
-- **framework-advisor** — Ensure todos cover the right framework choices (if applicable)
-
-For frontend projects, additionally deploy:
-
-- **uiux-designer** — Ensure UI/UX todos cover design system, responsive layouts, accessibility
-- **flutter-specialist** or **react-specialist** — Framework-specific frontend todos
+- **security-reviewer** — Flag security-sensitive tasks early (credentials, OAuth flow, atomic file handling)
 
 Red team the todo list with agents until they confirm no gaps remain.
 

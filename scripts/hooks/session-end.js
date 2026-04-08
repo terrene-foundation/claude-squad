@@ -2,7 +2,14 @@
 /**
  * Hook: session-end
  * Event: SessionEnd
- * Purpose: Save session state for future resumption
+ * Purpose: Save a session checkpoint to ~/.claude/sessions/ for resume,
+ *          log a session_summary observation, clean up old session files.
+ *
+ * csq-specific. The original Kailash version called auto-processing functions
+ * in `../learning/instinct-processor` and `../learning/instinct-evolver` —
+ * neither of those modules exists in this repo. Their require()s threw and
+ * were silently swallowed by the surrounding try/catch, so the "auto-evolve"
+ * loop never actually ran. Removed.
  *
  * Exit Codes:
  *   0 = success (continue)
@@ -16,11 +23,10 @@ const {
   resolveLearningDir,
   ensureLearningDir,
   logObservation: logLearningObservation,
-  countObservations,
 } = require("./lib/learning-utils");
 
 // Timeout fallback — prevents hanging the Claude Code session
-const TIMEOUT_MS = 15000;
+const TIMEOUT_MS = 10000;
 const _timeout = setTimeout(() => {
   console.log(JSON.stringify({ continue: true }));
   process.exit(1);
@@ -33,12 +39,13 @@ process.stdin.on("end", () => {
   try {
     const data = JSON.parse(input);
     saveSession(data);
-    // SessionEnd hooks don't support hookSpecificOutput in schema
     console.log(JSON.stringify({ continue: true }));
+    clearTimeout(_timeout);
     process.exit(0);
   } catch (error) {
     console.error(`[HOOK ERROR] ${error.message}`);
     console.log(JSON.stringify({ continue: true }));
+    clearTimeout(_timeout);
     process.exit(1);
   }
 });
@@ -49,22 +56,17 @@ function saveSession(data) {
   const cwd = data.cwd;
   const homeDir = process.env.HOME || process.env.USERPROFILE;
   const sessionDir = path.join(homeDir, ".claude", "sessions");
-  const learningDir = resolveLearningDir(cwd);
 
   // Ensure directories exist
-  [sessionDir].forEach((dir) => {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-  });
+  try {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  } catch {}
   ensureLearningDir(cwd);
 
-  // Collect session statistics
   const sessionData = {
     session_id,
     cwd,
     endedAt: new Date().toISOString(),
-    stats: collectSessionStats(cwd),
   };
 
   try {
@@ -76,94 +78,23 @@ function saveSession(data) {
     const lastSessionFile = path.join(sessionDir, "last-session.json");
     fs.writeFileSync(lastSessionFile, JSON.stringify(sessionData, null, 2));
 
-    // Log enriched session_summary observation for learning
-    logLearningObservation(
-      cwd,
-      "session_summary",
-      {
-        file_counts: sessionData.stats,
-        framework: detectFramework(cwd),
-        duration_estimate: estimateSessionDuration(session_id, sessionDir),
-      },
-      {
-        session_id,
-      },
-    );
-
-    // --- Auto-processing pipeline (Phase 3) ---
+    // Log a minimal session_summary observation for the learning system
     try {
-      autoProcessLearning(learningDir);
-    } catch {}
-
-    // --- Feedback loop: render instincts to rules file (Phase 4) ---
-    try {
-      writeInstinctsRule(cwd, learningDir);
+      logLearningObservation(
+        cwd,
+        "session_summary",
+        { duration_estimate: estimateSessionDuration(session_id, sessionDir) },
+        { session_id },
+      );
     } catch {}
 
     // Clean up old sessions (keep last 20)
     cleanupOldSessions(sessionDir, 20);
-
-    return { saved: true, path: sessionFile };
-  } catch (error) {
-    return { saved: false, error: error.message };
-  }
-}
-
-// Scans top-level cwd only (not subdirectories) for performance in hooks.
-function collectSessionStats(cwd) {
-  try {
-    const stats = {
-      pythonFiles: 0,
-      testFiles: 0,
-      workflowFiles: 0,
-    };
-
-    const files = fs.readdirSync(cwd).filter((f) => f.endsWith(".py"));
-    stats.pythonFiles = files.length;
-
-    for (const file of files) {
-      if (/_test\.py$|test_.*\.py$/.test(file)) {
-        stats.testFiles++;
-      }
-      try {
-        const content = fs.readFileSync(path.join(cwd, file), "utf8");
-        if (/WorkflowBuilder/.test(content)) {
-          stats.workflowFiles++;
-        }
-      } catch {}
-    }
-
-    return stats;
-  } catch {
-    return {};
-  }
-}
-
-// Scans top-level cwd only (not subdirectories) for performance in hooks.
-function detectFramework(cwd) {
-  try {
-    const files = fs.readdirSync(cwd).filter((f) => f.endsWith(".py"));
-    for (const file of files.slice(0, 10)) {
-      try {
-        const content = fs.readFileSync(path.join(cwd, file), "utf8");
-        if (/@db\.model/.test(content) || /from dataflow/.test(content))
-          return "dataflow";
-        if (/from nexus/.test(content) || /Nexus\(/.test(content))
-          return "nexus";
-        if (/from kaizen/.test(content) || /BaseAgent/.test(content))
-          return "kaizen";
-        if (/WorkflowBuilder/.test(content)) return "core-sdk";
-      } catch {}
-    }
-    return "core-sdk";
-  } catch {
-    return "unknown";
-  }
+  } catch {}
 }
 
 function estimateSessionDuration(sessionId, sessionDir) {
   try {
-    // Check if there's a session start timestamp from the session file
     const sessionFile = path.join(sessionDir, `${sessionId}.json`);
     if (fs.existsSync(sessionFile)) {
       const data = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
@@ -179,69 +110,6 @@ function estimateSessionDuration(sessionId, sessionDir) {
   }
 }
 
-/**
- * Auto-process instincts and auto-evolve at session end.
- * Only runs when enough observations have accumulated (>= 10).
- * Pure file I/O, ~200ms for 1000 observations.
- */
-function autoProcessLearning(learningDir) {
-  const observationCount = countObservations(learningDir);
-  if (observationCount < 10) return;
-
-  // Auto-process: analyze observations and generate instincts
-  const processor = require("../learning/instinct-processor");
-  const obs = processor.loadObservations(learningDir);
-
-  const wp = processor.analyzeWorkflowPatterns(obs);
-  if (wp.length > 0) {
-    const wpInstincts = processor.generateInstincts(wp);
-    processor.saveInstincts(wpInstincts, "workflow-patterns", learningDir);
-  }
-
-  const efp = processor.analyzeErrorFixPatterns(obs);
-  if (efp.length > 0) {
-    const efpInstincts = processor.generateInstincts(efp);
-    processor.saveInstincts(efpInstincts, "error-fixes", learningDir);
-  }
-
-  const fp = processor.analyzeFrameworkPatterns(obs);
-  if (fp.length > 0) {
-    const fpInstincts = processor.generateInstincts(fp);
-    processor.saveInstincts(fpInstincts, "framework-selection", learningDir);
-  }
-
-  const dfp = processor.analyzeDataFlowPatterns(obs);
-  if (dfp.length > 0) {
-    const dfpInstincts = processor.generateInstincts(dfp);
-    processor.saveInstincts(dfpInstincts, "dataflow-models", learningDir);
-  }
-
-  // Auto-evolve: promote high-confidence instincts to skills/commands
-  const evolver = require("../learning/instinct-evolver");
-  const candidates = evolver.getCandidates(learningDir);
-  if (candidates.skill.length > 0 || candidates.command.length > 0) {
-    evolver.autoEvolve(learningDir);
-  }
-}
-
-/**
- * Render learned instincts to .claude/rules/learned-instincts.md
- * so Claude Code auto-loads them on the next session.
- */
-function writeInstinctsRule(cwd, learningDir) {
-  const { renderInstincts } = require("./lib/instinct-renderer");
-  const markdown = renderInstincts(learningDir);
-  if (!markdown) return;
-
-  const rulesDir = path.join(cwd, ".claude", "rules");
-  try {
-    fs.mkdirSync(rulesDir, { recursive: true });
-  } catch {}
-
-  const rulePath = path.join(rulesDir, "learned-instincts.md");
-  fs.writeFileSync(rulePath, markdown);
-}
-
 function cleanupOldSessions(sessionDir, keepCount) {
   try {
     const files = fs
@@ -254,7 +122,6 @@ function cleanupOldSessions(sessionDir, keepCount) {
       }))
       .sort((a, b) => b.mtime - a.mtime);
 
-    // Remove files beyond keepCount
     for (const file of files.slice(keepCount)) {
       try {
         fs.unlinkSync(file.path);

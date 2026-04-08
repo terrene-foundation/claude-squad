@@ -1,52 +1,45 @@
-## Session Notes [claude-squad] — updated 2026-04-08 (mid-session, continuing in new session)
+## Session Notes [claude-squad] — updated 2026-04-08
 
 ### Read These Files First (in order)
 
-1. `journal/0014-GAP-swap-does-not-force-cc-reload.md` — the unresolved root-cause investigation. `csq swap N` writes everything correctly but CC ignores it mid-session. Strongest hypothesis (unproven): CC caches OAuth creds in memory and only reloads on 401 / natural expiry. **This is the next session's primary work item.**
-2. `journal/0015-DECISION-strip-kailash-co-artifacts.md` — why 17 rule files were deleted from `.claude/rules/` and the hook `user-prompt-rules-reminder.js` was rewritten. User complained about per-turn rule injection bloat from Kailash SDK rules irrelevant to csq.
-3. `rotation-engine.py` — `live_credentials_account()` helper around line 485 (race-proof refresh-token match), `update_quota()` content routing around line 1010, `statusline_str()` Option B quiet UX with `⚠` warning flag around line 1145.
-4. `test-platform.sh` test [14] — regression test for the stuck-swap content-match fix. Sandboxed fake-HOME setup. 20/20 tests pass.
-5. `journal/0011-DISCOVERY-stuck-access-tokens.md` — prior context: `csq login N` is the recovery for stuck tokens.
-6. `journal/0013-DISCOVERY-windows-ctypes-handle-truncation.md` — Windows ctypes signatures (still relevant institutional knowledge from the cross-platform work).
-7. `CLAUDE.md` line 26 — the "in-place rotation works" claim should probably be qualified (see 0014 For Discussion #1).
+1. `journal/0016-DISCOVERY-cc-credential-reload-mechanism.md` — CC source analysis proving mtime-based credential reload exists. The 0014 "cached forever" hypothesis is revised: CC DOES detect `.credentials.json` writes before every API call.
+2. `journal/0014-GAP-swap-does-not-force-cc-reload.md` — original gap report. Context still valid but conclusions partially superseded by 0016.
+3. `rotation-engine.py` — `swap_to()` ~line 816 (now has post-swap diagnostics ~line 947), `live_credentials_account()` ~line 486, `update_quota()` ~line 1037, `backsync()` ~line 1262.
+4. `~/repos/contrib/claude-code-source-code/src/utils/auth.ts` — CC credential loading. Key: `getClaudeAIOAuthTokens` (1255, memoized), `invalidateOAuthCacheIfDiskChanged` (1320, mtime check), `checkAndRefreshOAuthTokenIfNeeded` (1427, called per API request).
+5. `~/repos/contrib/claude-code-source-code/src/services/api/client.ts` — line 132 calls refresh check; line 303 bakes fresh token into new Anthropic client per turn.
 
 ### Accomplished
 
-- **Data integrity bug fixed**: `update_quota()` now routes rate_limits to the refresh-token-content-matched account, preventing the "csq 4 is using csq 5's quota" file corruption. Marker files (`.csq-account`, `.current-account`) become hints; refresh-token content match is ground truth.
-- **Statusline UX (Option B)**: label stays as user's intent (`#4:jack`); a tiny `⚠` flag appears when CC has not adopted the swap. No alarming label flips.
-- **Regression test added**: `test-platform.sh [14]` covers the stuck-swap scenario. 20/20 tests pass.
-- **CO artifact cleanup**: 17 Kailash-specific rule files deleted (3230 lines removed). 3 remaining files rewritten for csq scope (`agents.md`, `security.md`, `zero-tolerance.md`). `user-prompt-rules-reminder.js` slimmed 175 → 87 lines.
-- Engine deployed: `~/.claude/accounts/rotation-engine.py` in sync with repo.
+- **CC source code analysis**: Full credential flow traced. CC has mtime-based invalidation (auth.ts:1320), per-turn client construction (withRetry.ts:185), triple-check before refresh. Swap SHOULD work per code.
+- **Verified live**: keychain format, service name, refresh token stability all match. Refresh tokens NOT rotated by Anthropic. Auto-rotate is disabled (no-op hook).
+- **Swap diagnostics added**: `swap_to()` does immediate readback + 2s delayed check. Prints `DIAG(+2s): .credentials.json OVERWRITTEN` if CC races.
+- **Committed**: `68a855b` (CO artifact cleanup) + `21d5ec5` (engine fixes + diagnostics). NOT pushed.
+- **User's specific scenario** (swap after 3h idle → CC stays on old account): no code-level explanation found. Diagnostic added to catch it next time.
 
 ### Outstanding
 
-- [ ] **Stuck-swap root cause is NOT solved** — only symptoms mitigated. User wants this resolved properly. See `journal/0014` "Open Questions / Next Experiments".
-- [ ] Pick a path to confirm the cached-token hypothesis: (a) research Anthropic's OAuth `/v1/oauth/revoke` endpoint non-destructively, or (b) controlled test against a live CC instance with a fresh access token. **User decision needed before acting.**
-- [ ] Update `CLAUDE.md:26` "in-place rotation works" claim — only conditionally true.
-- [ ] Add `.coc-sync-ignore` (or equivalent) so the upstream loom/ sync doesn't silently re-add the 17 deleted Kailash rules on next `/sync`.
-- [ ] Optional follow-on cleanup (NOT done this session): `.claude/skills/` (3.6 MB), `.claude/agents/` (348 KB), `.claude/commands/`, `scripts/hooks/validate-workflow.js` (1060 lines, mostly Kailash checks).
-- [ ] Commit the in-progress changes — nothing has been committed yet this session. Files modified: `rotation-engine.py`, `test-platform.sh`, `scripts/hooks/user-prompt-rules-reminder.js`, `.claude/rules/agents.md`, `.claude/rules/security.md`, `.claude/rules/zero-tolerance.md`. Files deleted: 17 in `.claude/rules/`. Files added: `journal/0014-GAP-...md`, `journal/0015-DECISION-...md`.
-- [ ] Pre-existing pyright warnings on `rotation-engine.py:125` and `:140` (`_lock_file`/`_unlock_file` cross-platform redeclaration) — harmless, low priority.
+- [ ] **Wait for swap diagnostic data** — next time swap fails, `DIAG(+2s)` output reveals the race. User's scenario: swap after hours idle.
+- [ ] **Push commits** — 2 commits on main, not yet pushed. Branch protection requires PR + admin merge.
+- [ ] **Update CLAUDE.md:26** — "in-place rotation works" is MORE valid now (CC has mtime detection), but user's failures are unexplained.
+- [ ] **Add `.coc-sync-ignore`** — prevent loom/ sync from re-adding 17 deleted Kailash rules.
+- [ ] **Optional cleanup**: `.claude/skills/` (3.6 MB), `.claude/agents/` (348 KB), `scripts/hooks/validate-workflow.js` (1060 lines).
+- [ ] Pre-existing pyright warnings `rotation-engine.py:125/:140` (`_lock_file`/`_unlock_file` redecl) — harmless.
 
 ### Oversight — Verify Before Starting
 
-- [ ] `git status -s` — should show ~24 modified/deleted/new files, NO new commits yet
+- [ ] `git log --oneline -3` — should show `21d5ec5` and `68a855b`
 - [ ] `bash test-platform.sh` — must show `PASS: 20  FAIL: 0`
-- [ ] `ls .claude/rules/ | wc -l` — should be `13`
-- [ ] `diff -q rotation-engine.py ~/.claude/accounts/rotation-engine.py` — must be in sync
+- [ ] `diff -q rotation-engine.py ~/.claude/accounts/rotation-engine.py` — in sync
 - [ ] `python3 -m py_compile rotation-engine.py` — must pass
-- [ ] `grep -c "DataFlow\|Nexus\|Kaizen\|kailash" .claude/rules/*.md` — should be near zero (only `cc-artifacts.md` may legitimately reference framework names in examples)
-- [ ] Quick state check: `cat ~/.claude/accounts/config-4/.current-account ~/.claude/accounts/config-5/.current-account` — both should still be `4` (the user's recovered state)
+- [ ] `ls .claude/rules/ | wc -l` — should be `13`
 
 ### Oversight — Verify After Completing
 
 - [ ] `bash test-platform.sh` still 20/20 PASS
-- [ ] `live_credentials_account()` still in `rotation-engine.py` and used by BOTH `update_quota()` and `statusline_str()`
-- [ ] No new direct `os.replace` (use `_atomic_replace` for Windows retry)
-- [ ] No new `os.kill(pid, 0)` (use `_is_pid_alive`)
-- [ ] Stuck-swap regression test [14] still expects the quiet UX (`#1` label + `⚠` flag), NOT a `#2⚠1` label flip
-- [ ] Any new `csq swap` behavior is documented in a journal follow-up to 0014, not just code comments
+- [ ] `live_credentials_account()` used by BOTH `update_quota()` and `statusline_str()`
+- [ ] Swap diagnostic (readback + delayed verify) still in `swap_to()`
+- [ ] No new `os.replace` (use `_atomic_replace`) or `os.kill(pid, 0)` (use `_is_pid_alive`)
 
 ### Blockers
 
-- **User decision needed**: Pursue Anthropic OAuth revoke endpoint research first, OR a controlled live-CC test to confirm the cached-token hypothesis. User is running 8 concurrent CC sessions across config-1/2/4/5/7 — disrupting any of them is costly. Recommendation: start with non-destructive endpoint research.
+- **Diagnostic data needed**: swap-overwrite diagnostic must fire in the wild to close 0014. User runs 8 concurrent sessions — next stuck swap will produce the trace.
