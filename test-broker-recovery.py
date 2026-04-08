@@ -403,6 +403,121 @@ def test_flag_cleared_on_success(engine_path):
         shutil.rmtree(tmpdir)
 
 
+def child_statusline_self_heal(
+    config_dir_str,
+    accounts_dir_str,
+    creds_dir_str,
+    engine_path_str,
+    result_file_str,
+):
+    """Runs in a subprocess: invokes statusline_str() with a stale flag in
+    place. Self-heal logic should clear the flag (canonical was rewritten
+    AFTER the flag was touched) and the result string should NOT carry
+    the warning prefix.
+    """
+    import importlib.util
+    import os as _os
+    from pathlib import Path as _Path
+
+    _os.environ["CLAUDE_CONFIG_DIR"] = config_dir_str
+
+    spec = importlib.util.spec_from_file_location("engine", engine_path_str)
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    engine.ACCOUNTS_DIR = _Path(accounts_dir_str)
+    engine.CREDS_DIR = _Path(creds_dir_str)
+    engine.PROFILES_FILE = _Path(accounts_dir_str) / "profiles.json"
+    engine.QUOTA_FILE = _Path(accounts_dir_str) / "quota.json"
+
+    out = engine.statusline_str()
+    _Path(result_file_str).write_text(out)
+
+
+def test_statusline_self_heals_stale_flag(engine_path):
+    """A broker-failed flag was touched in a prior cycle. Then csq login
+    rewrote canonical (newer mtime). The next statusline render should
+    detect canonical.mtime >= flag.mtime, treat the flag as stale, remove
+    it, and emit the account label WITHOUT the ⚠LOGIN-NEEDED prefix.
+    """
+    print("\n=== self-heal: statusline clears stale flag when canonical is newer ===")
+    tmpdir, accounts_dir, creds_dir = _setup_accounts("csq-self-heal-")
+    try:
+        now_ms = int(time.time() * 1000)
+        # Canonical with a fresh 8h token (just-logged-in state)
+        canonical = creds_dir / "1.json"
+        canonical.write_text(
+            json.dumps(
+                _make_creds(RT_LIVE, AT_LIVE, now_ms + 8 * 60 * 60 * 1000),
+                indent=2,
+            )
+        )
+
+        config_1 = accounts_dir / "config-1"
+        config_1.mkdir(parents=True)
+        (config_1 / ".csq-account").write_text("1")
+        (config_1 / ".credentials.json").write_text(
+            json.dumps(
+                _make_creds(RT_LIVE, AT_LIVE, now_ms + 8 * 60 * 60 * 1000),
+                indent=2,
+            )
+        )
+        (config_1 / ".current-account").write_text("1")
+
+        # Touch the flag FIRST, then sleep, then rewrite canonical so the
+        # canonical mtime is strictly newer than the flag mtime. (On macOS
+        # APFS, mtime resolution is sub-second so a brief sleep is enough.)
+        flag = creds_dir / "1.broker-failed"
+        flag.touch()
+        time.sleep(0.05)
+        canonical.write_text(
+            json.dumps(
+                _make_creds(RT_LIVE, AT_LIVE, now_ms + 8 * 60 * 60 * 1000),
+                indent=2,
+            )
+        )
+
+        # Sanity: confirm the precondition holds
+        assert (
+            canonical.stat().st_mtime > flag.stat().st_mtime
+        ), "test setup wrong: canonical mtime is not strictly newer than flag"
+
+        result_file = tmpdir / "result"
+        result_file.write_text("")
+
+        ok = _run_child(
+            child_statusline_self_heal,
+            (
+                str(config_1),
+                str(accounts_dir),
+                str(creds_dir),
+                engine_path,
+                str(result_file),
+            ),
+        )
+        if not ok:
+            print("  ✗ subprocess hung")
+            return False
+
+        out = result_file.read_text()
+        results = []
+        results.append(("flag removed by statusline render", not flag.exists()))
+        results.append(
+            (
+                "no ⚠LOGIN-NEEDED prefix when canonical is fresher than flag",
+                "LOGIN-NEEDED" not in out,
+            )
+        )
+
+        passed = sum(1 for _, ok in results if ok)
+        failed = len(results) - passed
+        for name, ok in results:
+            icon = "✓" if ok else "✗"
+            print(f"  {icon} {name}")
+        return failed == 0
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def main():
     engine_path = str((Path(__file__).parent / "rotation-engine.py").resolve())
     if not os.path.exists(engine_path):
@@ -413,6 +528,7 @@ def main():
     all_passed &= test_recovery_success(engine_path)
     all_passed &= test_recovery_failure(engine_path)
     all_passed &= test_flag_cleared_on_success(engine_path)
+    all_passed &= test_statusline_self_heals_stale_flag(engine_path)
 
     print()
     if all_passed:

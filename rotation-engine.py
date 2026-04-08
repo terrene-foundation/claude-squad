@@ -1274,11 +1274,34 @@ def statusline_str():
     # Broker-failure warning: when broker_check exhausted both the primary
     # refresh and the live-sibling recovery, it touches credentials/N.broker-failed.
     # Surface a visible, unmissable prefix so the user sees it in their
-    # statusline on the very next render — no need to check logs. The flag
-    # is cleared automatically on the next successful broker refresh.
+    # statusline on the very next render — no need to check logs.
+    #
+    # The flag is cleared in three ways:
+    #   1. Next successful broker refresh (broker_mark_recovered)
+    #   2. csq login N (explicit user "I fixed it" signal)
+    #   3. Self-healing here: if canonical/N.json was rewritten AFTER the
+    #      flag was touched (e.g. by csq login, by manual recovery, by a
+    #      broker run we missed), the flag is stale and we clear it on the
+    #      next render. Without this, a fresh login leaves the warning
+    #      stuck for hours until the broker happens to fire again.
     flag_acct = csq_account_marker() or current
-    if flag_acct and _broker_failure_flag(flag_acct).exists():
-        result = f"⚠LOGIN-NEEDED {result}"
+    if flag_acct:
+        flag = _broker_failure_flag(flag_acct)
+        canon = CREDS_DIR / f"{flag_acct}.json"
+        if flag.exists():
+            stale = False
+            try:
+                if canon.exists() and canon.stat().st_mtime >= flag.stat().st_mtime:
+                    stale = True
+            except OSError:
+                pass
+            if stale:
+                try:
+                    flag.unlink()
+                except (OSError, FileNotFoundError):
+                    pass
+            else:
+                result = f"⚠LOGIN-NEEDED {result}"
 
     return result
 

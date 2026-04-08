@@ -133,6 +133,14 @@ print(f'  Credentials saved to slot {n}')
 
   echo "$n" > "$config_dir/.current-account"
 
+  # Clear any stale broker-failure flag from a prior cycle. csq login is
+  # the explicit "user fixed it" signal: a fresh canonical/N.json with a
+  # valid OAuth session means the dead-RT condition the flag warns about
+  # no longer applies. Without this, the ⚠LOGIN-NEEDED prefix in the
+  # statusline would persist for hours until the broker happened to fire
+  # and clear it on its own.
+  rm -f "$ACCOUNTS_DIR/credentials/$n.broker-failed"
+
   # Save profile
   CSQ_ACCT="$n" CSQ_EMAIL="$email" CSQ_FILE="$ACCOUNTS_DIR/profiles.json" "$PY" -c "
 import json, os
