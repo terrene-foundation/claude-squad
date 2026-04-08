@@ -137,6 +137,20 @@ if IS_WINDOWS:
             return None
         return handle
 
+    def _try_lock_file(lock_path):
+        """Non-blocking variant: returns handle on success, None if held."""
+        name = "csq_" + str(lock_path).replace("\\", "_").replace("/", "_").replace(
+            ":", "_"
+        )
+        handle = _kernel32.CreateMutexW(None, False, name)
+        if not handle:
+            return None
+        wait_result = _kernel32.WaitForSingleObject(handle, 0)  # immediate
+        if wait_result != _WAIT_OBJECT_0:
+            _kernel32.CloseHandle(handle)
+            return None
+        return handle
+
     def _unlock_file(handle):
         if handle:
             _kernel32.ReleaseMutex(handle)
@@ -149,6 +163,16 @@ else:
         fd = open(lock_path, "w")
         fcntl.flock(fd, fcntl.LOCK_EX)
         return fd
+
+    def _try_lock_file(lock_path):
+        """Non-blocking variant: returns fd on success, None if held."""
+        fd = open(lock_path, "w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except (BlockingIOError, OSError):
+            fd.close()
+            return None
 
     def _unlock_file(fd):
         if fd:
@@ -1084,6 +1108,13 @@ def update_quota(json_str):
        the previous accepted update — identical payload under a different
        account is refused.
 
+       Known gap: if an API call happened between the last pre-swap
+       render and the swap, the payload hash differs from the cursor's
+       and this check lets it through. We accept that narrow race rather
+       than blanket-skipping all first-post-swap updates — the latter
+       drops legitimate accumulated-agent data when renders are hours
+       apart (heavy background agent workflows).
+
     2. CC can hold an old account's refresh token in memory across a
        swap_to() and overwrite the .credentials.json we just wrote when
        it next refreshes. The marker files (.csq-account, .current-account)
@@ -1302,9 +1333,16 @@ def backsync():
     """Update the canonical credentials/N.json that matches this terminal's
     live tokens. Called from statusline hook (background, on every render).
 
-    Uses refresh-token content matching to identify the correct N. This is
-    race-proof because refresh tokens are unique to each account and persist
-    across access token rotation."""
+    Strategy: refresh-token content match first (race-proof when tokens are
+    stable). If no match (= Anthropic rotated the refresh token during a
+    normal refresh), fall back to the .csq-account marker, which records
+    csq's intent for this config dir and is durable across token rotations.
+
+    The marker fallback is critical: without it, a rotated refresh token
+    leaves credentials/N.json frozen with the OLD token. The next csq swap
+    from another terminal would write that stale token back into
+    .credentials.json, overwriting CC's valid rotated token and causing
+    a 401 on the next refresh → forced re-login."""
     config_dir = _config_dir()
     if not config_dir:
         return
@@ -1324,9 +1362,18 @@ def backsync():
     if not live_refresh or not live_access:
         return  # don't trust empty creds
 
-    # Find which canonical file matches by refresh token. Prefer matching
-    # both refresh AND access (exact match → up to date). If only refresh
-    # matches, the access token has been rotated → update the canonical.
+    # Primary: find which canonical file matches by refresh token. Prefer
+    # matching both refresh AND access (exact match → up to date). If only
+    # refresh matches, the access token has been rotated → update the canonical
+    # IF our live expiresAt is strictly newer (monotonicity / ping-pong guard).
+    #
+    # Ping-pong scenario: two config dirs running the same account share the
+    # same refresh token. When one refreshes its access token, Anthropic
+    # invalidates the other's cached AT, which then refreshes to a new AT.
+    # Without the expiresAt guard, both terminals would overwrite canonical
+    # with their own "latest" on every render. With the guard, only the
+    # strictly-newest-refresh winner writes.
+    live_expires = live_oauth.get("expiresAt", 0)
     target_canonical = None
     needs_update = False
     for n in configured_accounts():
@@ -1342,12 +1389,50 @@ def backsync():
         if canon_refresh == live_refresh:
             target_canonical = canonical
             canon_access = canon_oauth.get("accessToken", "")
-            if canon_access != live_access:
+            canon_expires_primary = canon_oauth.get("expiresAt", 0)
+            if canon_access != live_access and live_expires > canon_expires_primary:
                 needs_update = True
             break
 
+    # Fallback: content match failed. This typically means Anthropic
+    # rotated the refresh token during CC's internal token refresh. The
+    # .csq-account marker is written by csq run/swap and is the durable
+    # intent record for this config dir. Trust it.
+    #
+    # Safety 1 — swap atomicity: we only land here when the LIVE refresh
+    # token matches no canonical. A well-formed csq swap to account M
+    # atomically writes credentials/M.json's tokens into .credentials.json,
+    # so the content match on M succeeds immediately and this fallback
+    # does not run. The only code path that reaches this fallback is CC's
+    # own refresh writing back a rotated token.
+    #
+    # Safety 2 — multi-terminal ping-pong: if two config dirs are running
+    # the same account (e.g., config-4 running account 4 natively and
+    # config-2 swapped to account 4), they may each hold a DIFFERENT
+    # valid refresh token (two OAuth sessions). Without a guard, both
+    # would fight to rewrite the canonical on every statusline render.
+    # Defense: only overwrite canonical if our live expiresAt is STRICTLY
+    # NEWER than what's currently in canonical. Whichever terminal
+    # refreshed most recently wins; older terminals leave canonical alone.
+    if target_canonical is None:
+        marker_acct = csq_account_marker()
+        if marker_acct:
+            marker_canonical = CREDS_DIR / f"{marker_acct}.json"
+            if marker_canonical.exists():
+                canon_expires_fb = 0
+                try:
+                    canon_data_fb = json.loads(marker_canonical.read_text())
+                    canon_expires_fb = canon_data_fb.get("claudeAiOauth", {}).get(
+                        "expiresAt", 0
+                    )
+                except (OSError, json.JSONDecodeError):
+                    pass
+                if live_expires > canon_expires_fb:
+                    target_canonical = marker_canonical
+                    needs_update = True
+
     if target_canonical is None or not needs_update:
-        return  # no match (probably a fresh login not yet captured) or already in sync
+        return  # no match and no marker (pre-login) or already in sync
 
     # Acquire a per-canonical lock so concurrent backsyncs from multiple
     # csq terminals (each running a different account) don't race on the
@@ -1359,12 +1444,17 @@ def backsync():
         return  # lock acquisition failed; will retry on next render
     try:
         # Re-read canonical inside the lock to avoid clobbering a write
-        # that another process just made
+        # that another process just made. Two conditions abort the write:
+        # 1. Canonical's access token already matches ours — in sync.
+        # 2. Canonical's expiresAt is >= ours — a concurrent process wrote
+        #    a newer (or equal) version; downgrading would lose data.
         try:
             current = json.loads(target_canonical.read_text())
-            cur_access = current.get("claudeAiOauth", {}).get("accessToken", "")
-            if cur_access == live_access:
-                return  # already in sync (another process beat us to it)
+            cur_oauth = current.get("claudeAiOauth", {})
+            cur_access = cur_oauth.get("accessToken", "")
+            cur_expires = cur_oauth.get("expiresAt", 0)
+            if cur_access == live_access or cur_expires >= live_expires:
+                return  # in sync, or concurrent process wrote newer → abort
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -1377,6 +1467,251 @@ def backsync():
             pass
     finally:
         _unlock_file(lock_handle)
+
+
+# ─── Broker (Option C: single refresher per account) ────
+#
+# The broker is csq's solution to the "N concurrent terminals on the same
+# OAuth account" problem. csq becomes the SOLE process that calls Anthropic's
+# /v1/oauth/token refresh endpoint. Per-account refresh locks prevent two
+# terminals from racing on the same refresh, eliminating the rotation-induced
+# 401s that plagued multi-terminal use.
+#
+# How it works:
+#   1. Statusline render fires broker_check() for the current config dir
+#   2. Broker reads credentials/N.json (the canonical for the marker's account)
+#   3. If expiresAt - now < REFRESH_AHEAD_SECS, try-acquire credentials/N.refresh-lock
+#   4. If lock acquired: POST to TOKEN_URL with current refresh token
+#   5. Write the new tokens to credentials/N.json (canonical)
+#   6. Fan out the new tokens to every config-X/.credentials.json where marker=N
+#   7. Release the lock
+#
+# Why this prevents 401s:
+#   - All terminals share the same refresh token
+#   - Only ONE refresh happens at a time (per-account lock)
+#   - Anthropic only sees ONE refresh per cycle, not N
+#   - If Anthropic rotates the refresh token in the response, the broker writes
+#     the new RT to canonical AND fans it out to all live configs
+#   - CC's mtime check picks up the new tokens on its next API call
+#   - CC never tries to refresh on its own because the access token is always
+#     fresh (broker keeps it ahead of the curve)
+#
+# What this does NOT prevent:
+#   - Anthropic invalidating a token mid-API-call (rare server-side event)
+#   - The very first refresh after CC starts, IF the token is already < REFRESH_AHEAD
+#     when CC starts and CC makes an API call before the broker fires
+#
+# These edge cases recover via CC's own 401 retry path, which re-reads
+# .credentials.json from disk — and the broker keeps that file fresh.
+
+REFRESH_AHEAD_SECS = 600  # refresh when < 10 min remaining
+
+
+def _scan_config_dirs_for_account(account_num):
+    """Return all config-N/ paths whose .csq-account marker matches.
+
+    Used by broker fanout to push fresh tokens to every active terminal
+    running this account. Skips dirs without a marker or with a different
+    account.
+    """
+    matches = []
+    if not ACCOUNTS_DIR.exists():
+        return matches
+    for d in ACCOUNTS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        if not d.name.startswith("config-"):
+            continue
+        marker_file = d / ".csq-account"
+        if not marker_file.exists():
+            continue
+        try:
+            marker_val = marker_file.read_text().strip()
+        except OSError:
+            continue
+        if marker_val == str(account_num):
+            matches.append(d)
+    return matches
+
+
+def _fan_out_credentials(account_num, new_creds):
+    """Write new credentials to every config-N/.credentials.json with marker=N.
+
+    Atomic per-file write. Failures on individual files are logged-and-continue
+    so a single permission error doesn't block the others.
+    """
+    for config_dir_path in _scan_config_dirs_for_account(account_num):
+        live_file = config_dir_path / ".credentials.json"
+        # Skip if live already has these credentials (avoid touching mtime)
+        try:
+            existing = json.loads(live_file.read_text())
+            existing_at = existing.get("claudeAiOauth", {}).get("accessToken", "")
+            new_at = new_creds.get("claudeAiOauth", {}).get("accessToken", "")
+            if existing_at == new_at:
+                continue
+        except (OSError, json.JSONDecodeError):
+            pass  # missing or corrupt — write fresh data anyway
+        try:
+            tmp = live_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(new_creds, indent=2))
+            _secure_file(tmp)
+            _atomic_replace(tmp, live_file)
+        except OSError:
+            pass  # tolerate per-file failures, broker will retry next render
+
+
+def broker_check():
+    """Check if the current account's token needs refresh, and refresh if so.
+
+    Called from the statusline hook (background) on every render. Uses a
+    per-account try-lock so only one terminal refreshes per cycle. The lock
+    is non-blocking — if another terminal holds it, this caller skips and
+    will retry on the next render.
+
+    The broker is what makes 5 concurrent terminals on the same account safe:
+    only ONE of them will actually call Anthropic's refresh endpoint.
+    """
+    config_dir = _config_dir()
+    if not config_dir:
+        return
+    marker_acct = csq_account_marker()
+    if not marker_acct:
+        return
+
+    canonical = CREDS_DIR / f"{marker_acct}.json"
+    if not canonical.exists():
+        return
+
+    try:
+        canon_data = json.loads(canonical.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+
+    expires_at = canon_data.get("claudeAiOauth", {}).get("expiresAt", 0)
+    refresh_tok = canon_data.get("claudeAiOauth", {}).get("refreshToken", "")
+    if not refresh_tok:
+        return
+
+    now_ms = int(time.time() * 1000)
+    seconds_remaining = (expires_at - now_ms) / 1000
+    if seconds_remaining > REFRESH_AHEAD_SECS:
+        return  # token still has plenty of life — no refresh needed
+
+    # Try to acquire the refresh lock. Non-blocking: if another terminal
+    # is already refreshing, skip this cycle.
+    refresh_lock = canonical.with_suffix(".refresh-lock")
+    lock_handle = _try_lock_file(refresh_lock)
+    if lock_handle is None:
+        return  # another terminal is refreshing
+
+    try:
+        # Re-read inside the lock to detect a concurrent refresh that
+        # finished while we were waiting (shouldn't happen with try-lock,
+        # but defensive).
+        try:
+            canon_data = json.loads(canonical.read_text())
+            new_expires = canon_data.get("claudeAiOauth", {}).get("expiresAt", 0)
+            new_seconds = (new_expires - now_ms) / 1000
+            if new_seconds > REFRESH_AHEAD_SECS:
+                return  # someone else already refreshed
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        # Refresh via Anthropic. refresh_token() writes the new tokens to
+        # the canonical for us.
+        new_creds = refresh_token(marker_acct, quiet=True)
+        if new_creds is None:
+            # Refresh failed. Could be: network error, refresh token revoked,
+            # rate-limited. CC's own 401 path will recover if the issue is
+            # transient. Don't spam logs.
+            return
+
+        # Fan out the new credentials to every active config-X/.credentials.json
+        # where marker = this account. CC's mtime check picks them up on the
+        # next API call without triggering CC's own refresh.
+        _fan_out_credentials(marker_acct, new_creds)
+    finally:
+        _unlock_file(lock_handle)
+
+
+# ─── Pullsync ────────────────────────────────────────────
+#
+# Inverse of backsync. Pulls fresh credentials FROM the canonical store TO
+# this terminal's live .credentials.json when the canonical has a strictly
+# newer expiresAt. This is what makes "5 terminals on the same account"
+# tolerable: when terminal A's CC refreshes a token, A's backsync writes
+# the new credentials to credentials/N.json. Terminal B's next statusline
+# render then pulls those credentials into config-B/.credentials.json
+# before B's CC tries to refresh — so B never attempts to use a stale
+# (just-rotated) refresh token and never 401s.
+#
+# Safety: only writes when canonical.expiresAt > live.expiresAt (strictly
+# newer). Never downgrades. Uses atomic_replace so a partial write cannot
+# corrupt CC's view.
+
+
+def pullsync():
+    """Pull fresh credentials from canonical to live when canonical is newer.
+
+    Called from the statusline hook on every render, alongside backsync().
+    Combined, the two converge to "newest token wins everywhere":
+      - backsync: live → canonical when live is newer
+      - pullsync: canonical → live when canonical is newer
+    """
+    config_dir = _config_dir()
+    if not config_dir:
+        return
+
+    marker_acct = csq_account_marker()
+    if not marker_acct:
+        return  # no marker — nothing to pull from
+
+    marker_canonical = CREDS_DIR / f"{marker_acct}.json"
+    if not marker_canonical.exists():
+        return
+
+    live_creds_file = Path(config_dir) / ".credentials.json"
+    if not live_creds_file.exists():
+        return
+
+    try:
+        canon_data = json.loads(marker_canonical.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+
+    canon_oauth = canon_data.get("claudeAiOauth", {})
+    canon_refresh = canon_oauth.get("refreshToken", "")
+    canon_access = canon_oauth.get("accessToken", "")
+    canon_expires = canon_oauth.get("expiresAt", 0)
+    if not canon_refresh or not canon_access:
+        return  # don't trust empty canonical
+
+    try:
+        live_data = json.loads(live_creds_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        # Live file is corrupt or missing — pulling fresh data is exactly
+        # what we want. Fall through to the write.
+        live_data = {}
+
+    live_oauth = live_data.get("claudeAiOauth", {})
+    live_expires = live_oauth.get("expiresAt", 0)
+    live_access = live_oauth.get("accessToken", "")
+
+    # Only pull if canonical is strictly newer. Tied or older → no-op.
+    # The strict-newer check prevents oscillation when canonical and live
+    # have identical (already-in-sync) data.
+    if canon_expires <= live_expires:
+        return
+    if canon_access == live_access:
+        return  # identical access token, no need to write
+
+    try:
+        tmp = live_creds_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(canon_data, indent=2))
+        _secure_file(tmp)
+        _atomic_replace(tmp, live_creds_file)
+    except OSError:
+        pass
 
 
 # ─── Main ────────────────────────────────────────────────
@@ -1425,6 +1760,22 @@ def main():
         snapshot_account()
     elif cmd == "backsync":
         backsync()
+    elif cmd == "pullsync":
+        pullsync()
+    elif cmd == "broker":
+        broker_check()
+    elif cmd == "sync":
+        # Full sync cycle for the statusline hook:
+        #   1. broker_check: refresh proactively if token < 10 min from expiry
+        #      (writes canonical AND fans out to all live configs for this account)
+        #   2. backsync: propagate any locally-refreshed tokens to canonical
+        #   3. pullsync: pull canonical → live if canonical is newer
+        # Combined, these eliminate the multi-terminal-on-same-account 401
+        # problem: only one terminal calls Anthropic per refresh cycle, and
+        # all other terminals receive the new tokens via fanout or pullsync.
+        broker_check()
+        backsync()
+        pullsync()
     elif cmd == "email":
         if len(sys.argv) >= 3:
             _validate_account(sys.argv[2])

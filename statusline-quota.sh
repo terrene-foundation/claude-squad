@@ -39,10 +39,17 @@ session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
 # the incoming rate_limits to the correct (live) account.
 "$PY" "$HOME/.claude/accounts/rotation-engine.py" snapshot 2>/dev/null
 
-# Back-sync: keep credentials/N.json fresh with whatever CC has refreshed.
-# CC rotates refresh tokens during sessions. Without this, credentials/N.json
-# goes stale and `csq swap N` from another terminal writes revoked tokens.
-"$PY" "$HOME/.claude/accounts/rotation-engine.py" backsync 2>/dev/null &
+# Bidirectional sync: backsync (live → canonical when live is newer) +
+# pullsync (canonical → live when canonical is newer). Run together in
+# one Python invocation to avoid spawning two background processes per
+# render. Backsync first so pullsync sees the just-written canonical.
+#
+# Pullsync is what makes "5 terminals on the same account" tolerable:
+# when terminal A's CC refreshes and updates canonical via backsync,
+# terminal B's next render pulls those credentials into config-B/.credentials.json
+# BEFORE B's CC tries to refresh, so B never attempts to use a stale
+# (just-rotated) refresh token and never 401s.
+"$PY" "$HOME/.claude/accounts/rotation-engine.py" sync 2>/dev/null &
 
 # Feed quota data to rotation engine.
 echo "$input" | "$PY" "$HOME/.claude/accounts/rotation-engine.py" update 2>/dev/null &
