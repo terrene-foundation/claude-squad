@@ -13,21 +13,21 @@ const os = require("os");
  * Resolve the learning directory for a given project.
  *
  * Priority:
- *   1. KAILASH_LEARNING_DIR env var (for testing)
+ *   1. CSQ_LEARNING_DIR env var (for testing)
  *   2. <cwd>/.claude/learning/ (per-project)
- *   3. ~/.claude/kailash-learning/ (legacy fallback)
+ *   3. ~/.claude/csq-learning/ (fallback when no cwd given)
  *
  * @param {string} [cwd] - Project working directory
  * @returns {string} Absolute path to the learning directory
  */
 function resolveLearningDir(cwd) {
-  if (process.env.KAILASH_LEARNING_DIR) {
-    return process.env.KAILASH_LEARNING_DIR;
+  if (process.env.CSQ_LEARNING_DIR) {
+    return process.env.CSQ_LEARNING_DIR;
   }
   if (cwd) {
     return path.join(cwd, ".claude", "learning");
   }
-  return path.join(os.homedir(), ".claude", "kailash-learning");
+  return path.join(os.homedir(), ".claude", "csq-learning");
 }
 
 /**
@@ -39,16 +39,11 @@ function resolveLearningDir(cwd) {
 function ensureLearningDir(cwd) {
   const learningDir = resolveLearningDir(cwd);
 
-  const dirs = [
-    learningDir,
-    path.join(learningDir, "observations.archive"),
-    path.join(learningDir, "instincts", "personal"),
-    path.join(learningDir, "instincts", "inherited"),
-    path.join(learningDir, "evolved", "skills"),
-    path.join(learningDir, "evolved", "commands"),
-    path.join(learningDir, "evolved", "agents"),
-    path.join(learningDir, "checkpoints"),
-  ];
+  // Only create the top-level dir + observations archive. The instincts/
+  // and evolved/ subdirectories were used by the auto-evolution loop in the
+  // original Kailash template, but `scripts/learning/instinct-processor.js`
+  // doesn't exist in this repo so the loop never ran. Removed.
+  const dirs = [learningDir, path.join(learningDir, "observations.archive")];
 
   for (const dir of dirs) {
     try {
@@ -61,18 +56,11 @@ function ensureLearningDir(cwd) {
   if (!fs.existsSync(identityFile)) {
     try {
       const identity = {
-        system: "kailash-coc-claude-py",
+        system: "claude-squad",
         version: "2.0.0",
         created_at: new Date().toISOString(),
         learning_enabled: true,
         per_project: true,
-        focus_areas: [
-          "workflow-patterns",
-          "error-fixes",
-          "dataflow-patterns",
-          "testing-patterns",
-          "framework-selection",
-        ],
       };
       fs.writeFileSync(identityFile, JSON.stringify(identity, null, 2));
     } catch {}

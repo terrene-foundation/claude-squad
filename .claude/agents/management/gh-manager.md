@@ -110,7 +110,7 @@ requirements-analyst → gh-manager → todo-manager
 When this guidance is insufficient, consult:
 - GitHub CLI docs: https://cli.github.com/manual/
 - GitHub Projects docs: https://docs.github.com/en/issues/planning-and-tracking-with-projects
-- `.claude/skills/10-deployment-git/` - Git and GitHub patterns
+- `.claude/rules/branch-protection.md` — claude-squad branch protection workflow
 
 ---
 

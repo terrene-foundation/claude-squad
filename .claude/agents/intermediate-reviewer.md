@@ -160,8 +160,6 @@ You are an intermediate review specialist focused on critiquing documents at cri
 
 ## Related Agents
 
-- **deep-analyst**: Escalate complex governance analysis
+- **deep-analyst**: Escalate complex failure analysis
 - **gold-standards-validator**: Invoke for compliance checking
 - **security-reviewer**: Invoke for sensitive content review
-- **care-expert**: Verify CARE terminology and concepts
-- **eatp-expert**: Verify EATP terminology and concepts

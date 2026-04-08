@@ -62,21 +62,22 @@ Skills provide patterns and templates. This subagent provides:
 ### User Journey Mapping
 
 ```
-## Developer Journey
-1. Install SDK → pip install kailash
-2. Create workflow → WorkflowBuilder()
-3. Add nodes → workflow.add_node()
-4. Test locally → LocalRuntime()
-5. Deploy → Production config
+## User Journey (claude-squad)
+1. Install → `./install.sh`
+2. Login account 1 → `csq login 1` (browser OAuth)
+3. Login account N → `csq login 2` through `csq login 7`
+4. Start working → `csq run N` in a terminal
+5. Hot swap when quota hits → `! csq swap M` inside the CC session
 
 Success Criteria:
-- Setup in <5 minutes
-- First workflow in <10 minutes
-- Clear error messages
+- Install in <30 seconds
+- First account logged in under a minute
+- csq swap takes effect on next API call (no restart)
 
 Failure Points:
-- Missing dependencies
-- Unclear documentation
+- OAuth browser flow interrupted
+- Stale credentials (rotated refresh token) written back by swap
+- Concurrent terminals racing on credentials/N.json
 - Cryptic errors
 ```
 
@@ -217,12 +218,12 @@ Phase 3: [Polish] - Z days
 ### Before Requirements Analysis
 
 - Use **deep-analyst** for deep problem analysis
-- Use **sdk-navigator** to find existing patterns
+- Read `journal/` for prior decisions and discoveries
 
 ### After Requirements Analysis
 
 - Use **todo-manager** to create task breakdown
-- Use **framework-advisor** for technology selection
+- Use **security-reviewer** for any change touching credentials, OAuth, or atomic file handling
 
 ## Common Requirements Patterns
 
@@ -270,7 +271,6 @@ REQ: Secure access control
 ## Related Agents
 
 - **deep-analyst**: Invoke first for complex failure analysis
-- **framework-advisor**: Consult for framework selection decisions
 - **tdd-implementer**: Hand off after requirements for test-first development
 - **todo-manager**: Delegate for task breakdown and tracking
 - **intermediate-reviewer**: Request review after ADR completion
@@ -279,6 +279,5 @@ REQ: Secure access control
 
 When this guidance is insufficient, consult:
 
-- `.claude/skills/13-architecture-decisions/` - Architecture decision patterns
-- `.claude/skills/07-development-guides/` - Implementation guides
-- `.claude/skills/07-development-guides/enterprise-features.md` - Enterprise patterns
+- `journal/` — prior DECISION entries for architectural context
+- `CLAUDE.md` — project absolute directives

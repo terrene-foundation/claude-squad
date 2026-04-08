@@ -184,4 +184,4 @@ The Kailash COC Implementation:
 
 ## For Detailed Information
 
-If Foundation source docs exist in this repo, read the COC Core Thesis for additional depth. For comprehensive analysis, invoke the **coc-expert** agent.
+If Foundation source docs exist in this repo, read the COC Core Thesis for additional depth.

@@ -137,4 +137,4 @@ CO = Cognitive Orchestration
 
 ## For Detailed Information
 
-If Foundation source docs exist in this repo, read the CO Core Thesis and CO specification for additional depth. For comprehensive analysis, invoke the **co-expert** agent.
+If Foundation source docs exist in this repo, read the CO Core Thesis and CO specification for additional depth.

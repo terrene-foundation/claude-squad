@@ -37,7 +37,7 @@ feat(auth): add OAuth2 support
 fix(api): resolve rate limiting issue
 docs(readme): update installation guide
 refactor(workflow): simplify node connection logic
-test(dataflow): add integration tests for bulk operations
+test(rotation-engine): add concurrency tests for backsync
 ```
 
 **Enforced by**: Pre-commit hook (future)
@@ -62,7 +62,7 @@ Feature branches MUST follow naming convention.
 - `fix/api-timeout`
 - `docs/update-readme`
 - `refactor/workflow-builder`
-- `test/dataflow-integration`
+- `test/rotation-concurrency`
 
 ### 4. PR Description
 

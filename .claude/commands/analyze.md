@@ -82,24 +82,14 @@ Deploy these agents as a team for analysis:
 
 - **deep-analyst** — Failure analysis, complexity assessment, identify risks
 - **requirements-analyst** — Break down requirements, create ADRs, define scope
-- **coc-expert** — Ground analysis in COC methodology; identify institutional knowledge gaps and guard against the three fault lines (amnesia, convention drift, security blindness)
-- **framework-advisor** — Choose implementation approach (if applicable)
-- **sdk-navigator** — Find existing patterns and documentation before designing from scratch (if applicable)
-
-For product/market analysis, additionally deploy:
-
-- **value-auditor** — Evaluate from enterprise buyer perspective, critique value propositions
-
-For frontend projects, additionally deploy:
-
-- **uiux-designer** — Information architecture, visual hierarchy, design system planning
-- **ai-ux-designer** — AI interaction patterns (if the project involves AI interfaces)
+- **security-reviewer** — Early security review for sensitive components (credentials, OAuth, file handling)
 
 Red team the analysis with agents until they confirm no gaps remain in research, plans, and user flows.
 
 ### Journal
 
 Create journal entries in the workspace's `journal/` directory for insights produced during analysis:
+
 - **DISCOVERY** entries for key findings, patterns, or domain knowledge uncovered
 - **GAP** entries for missing information, unvalidated assumptions, or areas needing research
 - **CONNECTION** entries for relationships between components, requirements, or findings

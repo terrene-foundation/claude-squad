@@ -2,72 +2,46 @@
 
 ## Scope
 
-These rules apply to ALL sessions, ALL agents, ALL code changes, ALL phases. They are ABSOLUTE and NON-NEGOTIABLE. There is NO flexibility on any of these rules.
+These rules apply to ALL sessions, ALL agents, ALL code changes. They are
+ABSOLUTE. NO flexibility.
 
-## ABSOLUTE RULE 1: Pre-Existing Failures MUST Be Resolved
+## RULE 1: Pre-Existing Failures MUST Be Resolved
 
-When tests, red team validation, code review, or any analysis reveals a pre-existing failure:
+When tests, validation, or analysis reveals a pre-existing failure:
+**YOU MUST FIX IT.** "Not introduced in this session" is not an acceptable
+response. If you found it, you own it.
 
-**YOU MUST FIX IT.** Period.
+**Required**: diagnose root cause → implement fix → write regression test
+→ verify → commit.
 
-"It was not introduced in this session" is NOT an acceptable response. If you found it, you own it.
+**BLOCKED responses**:
 
-**Required response to ANY pre-existing failure:**
+- "Pre-existing issue, out of scope"
+- "Noting as a known issue for future resolution"
+- Any acknowledgment without a fix
 
-1. Diagnose the root cause
-2. Implement the fix
-3. Write a regression test that fails without the fix and passes with it
-4. Verify the fix with `pytest`
-5. Include the fix in the current commit or a dedicated fix commit
+**Exception**: User explicitly says "skip" or "ignore."
 
-**BLOCKED responses:**
+## RULE 2: No Stubs, Placeholders, Deferred Implementation
 
-- "This is a pre-existing issue, not introduced in this session"
-- "This failure exists in the current codebase and is outside the scope of this change"
-- "Noting this as a known issue for future resolution"
-- ANY response that acknowledges a failure without fixing it
+Stubs are BLOCKED. See `no-stubs.md` for detection patterns and enforcement.
+`validate-workflow.js` exits with code 2 on detection.
 
-**The only acceptable exception:** The user explicitly says "skip this issue" or "ignore this for now."
+## RULE 3: No Naive Fallbacks or Error Hiding
 
-## ABSOLUTE RULE 2: No Stubs, Placeholders, or Deferred Implementation — EVER
+`except: pass`, `return None` without logging, silent discards — BLOCKED.
+See `no-stubs.md` Section 3.
 
-Stubs are BLOCKED. No approval process. No exceptions. The validate-workflow hook exits with code 2 (BLOCK) on detection.
+## RULE 4: No Workarounds for Upstream Bugs
 
-Full detection patterns and enforcement: see `rules/no-stubs.md`.
+When you hit a bug in an upstream dependency (Claude Code CLI, Anthropic
+OAuth endpoint, macOS `security` tool): reproduce it, document it, and
+file an upstream issue. Do NOT re-implement the upstream's job yourself.
 
-## ABSOLUTE RULE 3: No Naive Fallbacks or Error Hiding
+**BLOCKED**: naive re-implementations, post-processing to "fix" upstream
+output, downgrading to avoid bugs.
 
-Hiding errors behind `except: pass`, `return None`, or silent discards is BLOCKED.
+## Language
 
-Full detection patterns and acceptable exceptions: see `rules/no-stubs.md` Section 3.
-
-## ABSOLUTE RULE 4: No Workarounds for Core SDK Issues
-
-When you encounter a bug in the SDK:
-
-**DO NOT work around it. DO NOT re-implement it naively.**
-
-File a GitHub issue on the SDK repository (`terrene-foundation/kailash-py`) with a minimal reproduction. Use a supported alternative pattern if one exists.
-
-**BLOCKED:** Naive re-implementations, post-processing to "fix" SDK output, downgrading to avoid bugs.
-
-## ABSOLUTE RULE 5: Version Consistency on Release
-
-When releasing ANY package, ALL version locations MUST be updated atomically:
-
-1. `pyproject.toml` → `version = "X.Y.Z"`
-2. `src/{package}/__init__.py` → `__version__ = "X.Y.Z"`
-
-The session-start hook checks this automatically. **A release with mismatched versions is BLOCKED.**
-
-## Enforcement
-
-1. **validate-workflow.js hook** — BLOCKS stubs and error hiding in production code
-2. **user-prompt-rules-reminder.js hook** — Injects zero-tolerance reminders every message
-3. **session-start.js hook** — Checks package freshness and COC sync status
-4. **intermediate-reviewer agent** — Validates compliance during code review
-5. **security-reviewer agent** — Validates compliance during security review
-
-## Language Policy
-
-Every "MUST" means "MUST." Every "BLOCKED" means the operation WILL NOT proceed. Every "NO" means "NO."
+Every "MUST" means MUST. Every "BLOCKED" means the operation does not
+proceed. Every "NO" means NO.

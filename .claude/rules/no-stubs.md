@@ -1,3 +1,8 @@
+---
+paths:
+  - ".claude/**"
+---
+
 # No Stubs, TODOs, or Simulated Data
 
 ## Scope

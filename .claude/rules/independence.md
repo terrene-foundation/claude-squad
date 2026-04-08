@@ -6,55 +6,57 @@ These rules apply to ALL files in this repository — code, documentation, confi
 
 ## MUST Rules
 
-### 1. Kailash Python SDK Is a Standalone Foundation Product
+### 1. claude-squad Is a Terrene Foundation Tool
 
-Kailash Python SDK is owned by the Terrene Foundation (Singapore CLG). It is an independent open-source product. All design decisions must be made on the SDK's own merits — what is best for its users and the open-source community.
+claude-squad is owned by the Terrene Foundation (Singapore CLG). It is an independent open-source tool for managing Claude Code multi-account rotation. All design decisions must be made on the tool's own merits — what is best for its users and the open-source community.
+
+**Why**: claude-squad is Foundation-owned and irrevocably open. It has no structural relationship with any commercial entity.
+
+**How to apply**: Features land if they help the people who run multiple Claude Code sessions. They don't land because they benefit any commercial product.
 
 ### 2. No Commercial References
 
-MUST NOT reference, discuss, compare with, or design against any commercial or proprietary product in any file in this repository. This includes:
+MUST NOT reference, discuss, compare with, or design against any commercial or proprietary product:
 
 - Proprietary product names (do not name them, do not compare against them)
-- Proprietary SDKs or runtimes (do not reference Rust SDKs or proprietary frameworks)
 - Commercial entities (no company names, no commercial partnerships)
-- Market positioning or competitive differentiation (not a concern of this project)
+- Market positioning or competitive differentiation
 - Commercial deployment models (managed hosting, enterprise pricing, SaaS)
 
-**Why**: Kailash Python SDK is Foundation-owned and irrevocably open. It has no structural relationship with any commercial entity. Introducing commercial references — even for comparison — creates implicit coupling and suggests a relationship that does not exist.
+**Why**: Introducing commercial references — even for comparison — creates implicit coupling and suggests a relationship that does not exist.
 
-**How to apply**: If you find yourself writing "unlike X" or "the open-source version of Y" or "differentiates from Z" — stop. Describe what the Kailash Python SDK does on its own terms. If a feature is good for SDK users, build it. If it isn't, don't. The existence or non-existence of any other product is irrelevant.
+**How to apply**: If you find yourself writing "unlike X" or "the open-source version of Y" — stop. Describe what claude-squad does on its own terms.
 
-### 3. Foundation-Only Dependencies
+### 3. Foundation-Only and Upstream Dependencies
 
-Kailash Python SDK MUST depend only on:
+claude-squad MUST depend only on:
 
-- **Standard open-source libraries**: From PyPI, with OSI-approved licenses
-- **Open standards**: CARE, EATP, CO (CC BY 4.0) where applicable
+- **Python 3 standard library** (the engine is intentionally stdlib-only, plus `ctypes` on Windows)
+- **POSIX/macOS/Windows system tools** available by default (`bash`, `jq`, `security` on macOS, `mklink` on Windows)
+- **Claude Code itself** — the one upstream we integrate with
 
-MUST NOT depend on, import from, or interface with any proprietary SDK, runtime, or API.
+MUST NOT add PyPI dependencies, Node modules, Rust crates, or any other third-party runtime requirement. The tool must remain installable with a single `./install.sh` on a vanilla system.
+
+**Why**: Every dependency is a potential point of failure across 15 concurrent terminals and five platforms. The tool manages credentials; every imported package is attack surface. stdlib-only keeps both blast radius and install friction near zero.
+
+**How to apply**: Before adding `import foo`, check if it's in the stdlib. If not, write it yourself or don't do it.
 
 ### 4. No "Open-Source Version Of" Language
 
-MUST NOT describe Kailash Python SDK as:
+MUST NOT describe claude-squad as "the open-source version of [anything]" or "the [X] port of [anything]." claude-squad IS the tool — it is not a derivative, port, or counterpart.
 
-- "The open-source version of [anything]"
-- "The Python port of [anything]"
-- "The community edition of [anything]"
+**Correct**: "claude-squad is a Terrene Foundation tool for Claude Code multi-account rotation."
+**Incorrect**: "claude-squad is the open-source version of [product name]."
 
-Kailash Python SDK IS the product. It is not a derivative, port, counterpart, or edition of something else.
-
-**Correct**: "Kailash Python SDK is the Terrene Foundation's open-source workflow orchestration platform."
-**Incorrect**: "Kailash Python SDK is the Python version of [product name]."
-
-### 5. Design for SDK Users
+### 5. Design for csq Users
 
 All feature decisions, architectural choices, and roadmap priorities must be driven by:
 
-- What SDK users need
-- What Python developers expect from a workflow orchestration SDK
+- What csq users need (people running many CC sessions on many accounts)
+- What Python/bash developers expect from a cross-platform CLI tool
 - What the open-source community contributes
 
-Never by what any other product does, doesn't do, or plans to do.
+Never by what any commercial product does, doesn't do, or plans to do.
 
 ## MUST NOT Rules
 
@@ -65,6 +67,8 @@ Code, comments, and documentation MUST NOT demonstrate awareness of any propriet
 - Reference proprietary file paths, module names, or architecture patterns
 - Suggest "compatibility" or "interop" with proprietary systems
 - Design APIs "so that [proprietary product] can also use them"
+
+**Why**: claude-squad's only upstream is Claude Code itself, which is Anthropic's official CLI. That integration is inherent. Every other integration is gratuitous coupling.
 
 ### 2. No Commercial Strategy Discussion
 
@@ -85,4 +89,4 @@ MUST NOT:
 
 ## Clarification
 
-Third parties — anyone, anywhere — may build commercial products on top of the Kailash Python SDK and Foundation standards. That is the intended open-source model. But the SDK itself has zero knowledge of, zero dependency on, and zero design consideration for any such product. If someone builds on Kailash, they adapt to Kailash — not the other way around.
+Third parties may build commercial products on top of csq. That is the intended open-source model. But the tool itself has zero knowledge of, zero dependency on, and zero design consideration for any such product.

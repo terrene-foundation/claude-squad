@@ -284,6 +284,107 @@ with tempfile.TemporaryDirectory() as d:
     fi
 fi
 
+# ─── Test 14: Stuck-swap regression (marker lies, content is truth) ─
+# Regression for: after `csq swap N`, CC can hold an old refresh token in
+# memory and write it back to .credentials.json. The markers then claim
+# account N while CC is actually running the old account. update_quota
+# must attribute the live rate_limits to the CONTENT-matched account (not
+# the marker-claimed one), and statusline must flag the mismatch.
+echo "[14] Stuck-swap regression: content-match overrides stale markers"
+if [ -n "${PY:-}" ]; then
+    out=$("$PY" -c "
+import sys, os, tempfile, json
+sys.path.insert(0, '.')
+import importlib.util
+
+with tempfile.TemporaryDirectory() as tmp:
+    # Build a fake HOME so ACCOUNTS_DIR / CREDS_DIR / QUOTA_FILE land here
+    os.environ['HOME'] = tmp
+    os.environ['USERPROFILE'] = tmp  # Windows
+    accounts = os.path.join(tmp, '.claude', 'accounts')
+    creds = os.path.join(accounts, 'credentials')
+    config_dir = os.path.join(accounts, 'config-1')
+    os.makedirs(creds, exist_ok=True)
+    os.makedirs(config_dir, exist_ok=True)
+
+    # Two canonical accounts with distinct refresh tokens
+    def creds_blob(refresh, access):
+        return {'claudeAiOauth': {'refreshToken': refresh, 'accessToken': access}}
+    with open(os.path.join(creds, '1.json'), 'w') as f:
+        json.dump(creds_blob('refresh-ONE', 'access-ONE'), f)
+    with open(os.path.join(creds, '2.json'), 'w') as f:
+        json.dump(creds_blob('refresh-TWO', 'access-TWO'), f)
+
+    # Profiles so configured_accounts() sees 1 and 2
+    with open(os.path.join(accounts, 'profiles.json'), 'w') as f:
+        json.dump({'accounts': {'1': {'email': 'one@x'}, '2': {'email': 'two@x'}}}, f)
+
+    # STUCK STATE: live .credentials.json holds account 2's refresh token
+    # (CC is running account 2), but the markers insist account 1.
+    with open(os.path.join(config_dir, '.credentials.json'), 'w') as f:
+        json.dump(creds_blob('refresh-TWO', 'access-TWO-refreshed'), f)
+    with open(os.path.join(config_dir, '.csq-account'), 'w') as f:
+        f.write('1')
+    with open(os.path.join(config_dir, '.current-account'), 'w') as f:
+        f.write('1')
+    os.environ['CLAUDE_CONFIG_DIR'] = config_dir
+
+    # Import the engine AFTER env is set so Path.home() binds to tmp
+    spec = importlib.util.spec_from_file_location('engine', 'rotation-engine.py')
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    # (a) live_credentials_account returns the CONTENT-matched account
+    live = m.live_credentials_account()
+    if live != '2':
+        print(f'FAIL: live_credentials_account returned {live!r}, expected 2')
+        sys.exit(1)
+
+    # (b) which_account returns the stale marker value
+    marker = m.which_account()
+    if marker != '1':
+        print(f'FAIL: which_account returned {marker!r}, expected 1')
+        sys.exit(1)
+
+    # (c) update_quota attributes the rate_limits to account 2 (content),
+    #     NOT account 1 (marker)
+    # load_state() auto-zeros windows whose resets_at is in the past,
+    # so use a timestamp well in the future.
+    import time as _t
+    future = int(_t.time()) + 3600
+    payload = json.dumps({'rate_limits': {
+        'five_hour':  {'used_percentage': 77, 'resets_at': future},
+        'seven_day':  {'used_percentage': 88, 'resets_at': future},
+    }})
+    m.update_quota(payload)
+    quota = json.loads(open(m.QUOTA_FILE).read())
+    accts = quota.get('accounts', {})
+    if '1' in accts:
+        print(f'FAIL: account 1 was contaminated with {accts[\"1\"]}')
+        sys.exit(1)
+    if accts.get('2', {}).get('five_hour', {}).get('used_percentage') != 77:
+        print(f'FAIL: account 2 was not updated correctly, got {accts.get(\"2\")}')
+        sys.exit(1)
+
+    # (d) statusline_str shows marker label (user's intent) with a tiny ⚠
+    # warning flag that CC is actually running a different account.
+    s = m.statusline_str()
+    if not s.startswith('#1'):
+        print(f'FAIL: statusline label not #1 (marker), got {s!r}')
+        sys.exit(1)
+    if '⚠' not in s:
+        print(f'FAIL: statusline missing warning flag ⚠, got {s!r}')
+        sys.exit(1)
+
+    print('OK')
+" 2>&1)
+    if [ "$out" = "OK" ]; then
+        pass "content-match overrides stale markers"
+    else
+        fail "stuck-swap regression" "$out"
+    fi
+fi
+
 # ─── Summary ─────────────────────────────────────────
 echo
 echo "===================================================="

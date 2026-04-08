@@ -2,16 +2,13 @@
 
 ## Scope
 
-These rules apply to ALL git operations across ALL repositories in the Kailash ecosystem.
+These rules apply to ALL git operations in the claude-squad repository.
 
 ## Protected Repositories
 
-| Repository                                 | Branch | Protection Level    |
-| ------------------------------------------ | ------ | ------------------- |
-| `terrene-foundation/kailash-py`            | `main` | Full (admin bypass) |
-| `terrene-foundation/kailash-coc-claude-py` | `main` | Full (admin bypass) |
-| `terrene-foundation/kailash-coc-claude-rs` | `main` | Full (admin bypass) |
-| `esperie/kailash-rs`                       | `main` | Full (admin bypass) |
+| Repository                        | Branch | Protection Level    |
+| --------------------------------- | ------ | ------------------- |
+| `terrene-foundation/claude-squad` | `main` | Full (admin bypass) |
 
 ## Protection Settings
 

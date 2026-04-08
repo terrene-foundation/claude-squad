@@ -215,24 +215,16 @@ Hooks MUST NOT attempt to understand code meaning via regex. Hooks check structu
 
 **Permitted exception**: `pre-compact.js` uses regex to detect which framework is in use (DataFlow/Nexus/Kaizen/Core SDK) for context preservation during compaction. This is structural tagging for checkpoint data, not agent decision-making — the hook never routes, classifies intent, or changes behavior based on the detection. Accepted per decision D1 in journal/0009.
 
-### 5. No BUILD Artifacts in USE Repos
+### 5. Artifacts Match the Project's Actual Scope
 
-USE repo COC templates (coc-claude-py, coc-claude-rs) MUST NOT contain BUILD-specific artifacts:
+Every agent, skill, rule, and command in `.claude/` MUST be relevant to the work this project actually does. claude-squad is a small Python/bash OAuth rotation tool — it has no frontend, no SDK to build, no domain framework, no enterprise governance. Importing artifacts from upstream templates is fine; keeping ones that don't apply is bloat.
 
 ```
-# BUILD-only (remove from USE repos):
-- agents/frontend/          # BUILD repos don't do frontend work
-- rules/cross-sdk-inspection.md  # BUILD-only process rule
-- skills/*-bindings/        # Internal binding code patterns
-- skills/*-enterprise/      # Internal crate documentation
-- skills/*-governance/      # Internal governance crate docs
-
-# USE-only (keep in USE repos, remove from BUILD):
-- rules/deployment.md (cloud deployment version)
-- agents/deployment-specialist.md (cloud deployment)
+# DO: A csq agent that handles credential atomic-write patterns
+# DO NOT: A "frontend-developer" or "dataflow-specialist" agent in csq
 ```
 
-**Why**: BUILD artifacts (SDK internals, binding patterns, crate docs) waste context in USE repos where developers build applications. USE artifacts (cloud deployment, user-facing patterns) waste context in BUILD repos where developers write SDK code.
+**Why**: Every agent file's description loads on every agent-selection turn. Every skill's frontmatter loads when the matcher fires. Irrelevant artifacts compound across every session, burning context for code paths that will never be invoked here.
 
 ### 6. No Dangling Cross-References After Extraction
 
@@ -253,4 +245,3 @@ rm -rf skills/10-governance/  # Leaves dangling refs in agent files
 
 - `.claude/skills/30-claude-code-patterns/` — Full CC architecture patterns
 - `.claude/agents/claude-code-architect.md` — CC artifact specialist
-- `.claude/guides/co-setup/03-creating-components.md` — Component creation guide

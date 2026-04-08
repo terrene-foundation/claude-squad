@@ -1,55 +1,45 @@
-## Session Notes [claude-squad] — updated 2026-04-08 (early morning)
+## Session Notes [claude-squad] — updated 2026-04-08
 
 ### Read These Files First (in order)
 
-1. `journal/0013-DISCOVERY-windows-ctypes-handle-truncation.md` — the critical CI false-positive bug found in final red team. Win32 HANDLE truncation. Most important institutional knowledge from the cross-platform work.
-2. `journal/0010-DECISION-remove-auto-rotate.md` — why csq is now manual-only. Auto-rotate fired on stale rate_limits and thrashed accounts.
-3. `journal/0011-DISCOVERY-stuck-access-tokens.md` — access tokens can be in a state where `auth.status` passes but `/v1/messages` returns 429 with no headers. Recovery is `csq login N`. Don't tell the user csq login won't help — it does.
-4. `journal/0012-DECISION-no-powershell-port.md` — why we chose Git Bash over PowerShell for Windows. CI proves 19/19 PASS on `windows-latest`. Saved ~400 lines of duplicate code.
-5. `workspaces/cross-platform/02-plans/02-revised-implementation-plan.md` — the implementation plan that was followed. All 32 todos completed and moved to `todos/completed/`.
-6. `rotation-engine.py` lines 86-118 — the centralized Win32 ctypes signatures. NEVER call `ctypes.windll.kernel32` afresh; always use the shared `_kernel32` module reference, otherwise signatures re-default.
-7. `rotation-engine.py` `backsync()` — uses refresh-token CONTENT MATCHING to identify the right canonical credential file. Race-proof.
-8. `rotation-engine.py` `update_quota()` cursor protection — `.quota-cursor` MUST NOT be deleted on swap (tried that, broke things).
+1. `journal/0016-DISCOVERY-cc-credential-reload-mechanism.md` — CC source analysis proving mtime-based credential reload exists. The 0014 "cached forever" hypothesis is revised: CC DOES detect `.credentials.json` writes before every API call.
+2. `journal/0014-GAP-swap-does-not-force-cc-reload.md` — original gap report. Context still valid but conclusions partially superseded by 0016.
+3. `rotation-engine.py` — `swap_to()` ~line 816 (now has post-swap diagnostics ~line 947), `live_credentials_account()` ~line 486, `update_quota()` ~line 1037, `backsync()` ~line 1262.
+4. `~/repos/contrib/claude-code-source-code/src/utils/auth.ts` — CC credential loading. Key: `getClaudeAIOAuthTokens` (1255, memoized), `invalidateOAuthCacheIfDiskChanged` (1320, mtime check), `checkAndRefreshOAuthTokenIfNeeded` (1427, called per API request).
+5. `~/repos/contrib/claude-code-source-code/src/services/api/client.ts` — line 132 calls refresh check; line 303 bakes fresh token into new Anthropic client per turn.
 
 ### Accomplished
 
-- **Cross-platform support shipped**: macOS, Linux, WSL, Windows (via Git Bash). All 5 milestones complete.
-- **CI matrix** (.github/workflows/test.yml) — `macos × ubuntu × windows × Python 3.11/3.12` = 6 jobs, all green.
-- **C1 fix**: Win32 ctypes handles no longer truncated. Concurrent locking smoke test verifies on every push.
-- **`csq setkey/listkeys/rmkey`** for provider profiles (mm, zai, claude direct API). Interactive hidden-input by default. Preserves existing fields.
-- **Auto-rotate removed entirely** — `swap_to()` doesn't call refresh endpoint, `update_quota()` doesn't trigger swaps, hook is no-op.
-- **OAuth thundering herd fixed** — csq never hammers refresh endpoint; CC handles its own refreshes.
-- **Backsync race fixed** — content match (refresh token), not stale `.csq-account` marker.
-- **README rewritten** for non-technical users — `csq setkey mm` step-by-step, no JSON editing required.
-- **15+ commits pushed** (range `42b2a3f..e65d34f`).
+- **CC source code analysis**: Full credential flow traced. CC has mtime-based invalidation (auth.ts:1320), per-turn client construction (withRetry.ts:185), triple-check before refresh. Swap SHOULD work per code.
+- **Verified live**: keychain format, service name, refresh token stability all match. Refresh tokens NOT rotated by Anthropic. Auto-rotate is disabled (no-op hook).
+- **Swap diagnostics added**: `swap_to()` does immediate readback + 2s delayed check. Prints `DIAG(+2s): .credentials.json OVERWRITTEN` if CC races.
+- **Committed**: `68a855b` (CO artifact cleanup) + `21d5ec5` (engine fixes + diagnostics). NOT pushed.
+- **User's specific scenario** (swap after 3h idle → CC stays on old account): no code-level explanation found. Diagnostic added to catch it next time.
 
 ### Outstanding
 
-- [ ] First statusline render after `csq swap` may show stale quota numbers for one cycle (until CC makes its first API call on the new account). Cosmetic. Worth a one-line fix in `statusline_str()` to suppress display when `.quota-cursor` doesn't match current account.
-- [ ] `auto_rotate()` function (rotation-engine.py:940-987) is dead code — only the CLI subcommand path. Decide: delete or keep as escape hatch.
-- [ ] Red team M-level findings unaddressed: M1 (`cleanup()` globs wrong files), M2 (PID reuse blind spot — could check `ps -o comm=` on cheap path), M3 (`.live-pid` written non-atomically). Low priority.
-- [ ] L7: smoke test doesn't exercise `swap_to()` end-to-end against a fake config dir. CI tests building blocks, not rotation logic. Worth adding.
-- [ ] Old `~/.claude/commands/rotate.md` may exist in some downstream installs. install.sh removes on upgrade only.
+- [ ] **Wait for swap diagnostic data** — next time swap fails, `DIAG(+2s)` output reveals the race. User's scenario: swap after hours idle.
+- [ ] **Push commits** — 2 commits on main, not yet pushed. Branch protection requires PR + admin merge.
+- [ ] **Update CLAUDE.md:26** — "in-place rotation works" is MORE valid now (CC has mtime detection), but user's failures are unexplained.
+- [ ] **Add `.coc-sync-ignore`** — prevent loom/ sync from re-adding 17 deleted Kailash rules.
+- [ ] **Optional cleanup**: `.claude/skills/` (3.6 MB), `.claude/agents/` (348 KB), `scripts/hooks/validate-workflow.js` (1060 lines).
+- [ ] Pre-existing pyright warnings `rotation-engine.py:125/:140` (`_lock_file`/`_unlock_file` redecl) — harmless.
 
 ### Oversight — Verify Before Starting
 
-- [ ] `git log --oneline -3` shows `e65d34f` or later
-- [ ] `bash test-platform.sh` exits 0 with `PASS: 19, FAIL: 0`
-- [ ] `gh run list --workflow=test.yml --limit 1` shows `success`
-- [ ] `cat ~/.claude/settings.json | python3 -c "import json,sys; print(json.load(sys.stdin).get('hooks', {}))"` does NOT contain `auto-rotate-hook`
-- [ ] `ls ~/.claude/accounts/auto-rotate-hook.sh` exists (no-op file — DO NOT delete; old per-config snapshots may still reference it)
-- [ ] `python3 -m py_compile rotation-engine.py` passes
-- [ ] Deployed copies in sync: `diff -q rotation-engine.py ~/.claude/accounts/rotation-engine.py && diff -q csq ~/.local/bin/csq && diff -q statusline-quota.sh ~/.claude/accounts/statusline-quota.sh`
+- [ ] `git log --oneline -3` — should show `21d5ec5` and `68a855b`
+- [ ] `bash test-platform.sh` — must show `PASS: 20  FAIL: 0`
+- [ ] `diff -q rotation-engine.py ~/.claude/accounts/rotation-engine.py` — in sync
+- [ ] `python3 -m py_compile rotation-engine.py` — must pass
+- [ ] `ls .claude/rules/ | wc -l` — should be `13`
 
 ### Oversight — Verify After Completing
 
-- [ ] `bash test-platform.sh` still 19/19 PASS
-- [ ] No new direct `os.replace` (use `_atomic_replace` for Windows retry)
-- [ ] No new `os.kill(pid, 0)` (use `_is_pid_alive`)
-- [ ] No new `subprocess.run(["security", ...])` outside `IS_MACOS` guards
-- [ ] No new hardcoded `python3` in shell scripts (use `$PY`)
-- [ ] If touching ctypes: every kernel32 call goes through `_kernel32` with signatures pre-set. Never call `ctypes.windll.kernel32` afresh.
+- [ ] `bash test-platform.sh` still 20/20 PASS
+- [ ] `live_credentials_account()` used by BOTH `update_quota()` and `statusline_str()`
+- [ ] Swap diagnostic (readback + delayed verify) still in `swap_to()`
+- [ ] No new `os.replace` (use `_atomic_replace`) or `os.kill(pid, 0)` (use `_is_pid_alive`)
 
 ### Blockers
 
-None. Cross-platform work is shipped and CI-verified. Remaining items are polish.
+- **Diagnostic data needed**: swap-overwrite diagnostic must fire in the wild to close 0014. User runs 8 concurrent sessions — next stuck swap will produce the trace.
