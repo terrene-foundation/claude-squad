@@ -15,3 +15,7 @@ upstream-internals/
 
 # Phase test outputs and other ephemeral analysis data
 journal/*-data/
+
+# Runtime learning state — auto-appended on every session start.
+# Tracking it produces churn on every commit and never carries useful diffs.
+.claude/learning/observations.jsonl
