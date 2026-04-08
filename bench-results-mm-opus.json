@@ -1,0 +1,73 @@
+{
+  "timestamp": "2026-04-09T01:26:02",
+  "results": {
+    "MiniMax-M2.7": {
+      "tool-usage": {
+        "ok": true,
+        "elapsed": 21.705811542000447,
+        "input_tokens": 51922,
+        "output_tokens": 224,
+        "num_turns": 3,
+        "result": "The script `check-manifest-parity.sh` validates that variant files in `loom/.claude/variants/` are in sync with the `sync-manifest.yaml` \u2014 detecting orphan files (on disk but not in manifest), stale entries (in manifest but missing from disk), and parity gaps (variants missing for some targets like `py`, `rs`, `rb`)."
+      },
+      "rule-following": {
+        "ok": true,
+        "elapsed": 28.31508274999942,
+        "input_tokens": 29527,
+        "output_tokens": 691,
+        "num_turns": 2,
+        "result": "The **Absolute Directives** from CLAUDE.md (lines 5\u201347) \u2014 these override ALL other instructions:\n\n1. **0. Foundation Independence \u2014 No Commercial Coupling**\n   Kailash Python SDK is a Terrene Foundation project. No references to, comparisons with, or design against any commercial/proprietary product.\n\n2. **1. Framework-First**\n   Never write code from scratch before checking whether Kailash frameworks already handle it. For this project, that means checking with the relevant specialist before raw SQL, custom API gateways, custom MCP servers, custom agentic platforms, or custom governance code.\n\n3. **2. .env Is the Single Source of Truth**\n   All API keys and model names MUST come from `.env`. Never hardcode credentials or model strings.\n\n4. **3. Implement, Don't Document**\n   When you discover a missing feature, endpoint, or record \u2014 implement or create it. Don't note it as a gap and move on. Only skip if the user explicitly says to.\n\n5. **4. Zero Tolerance**\n   Pre-existing failures MUST be fixed, not reported. Stubs are BLOCKED. Naive fallbacks are BLOCKED. SDK bugs get GitHub issues, not workarounds.\n\n6. **5. Recommended Reviews**\n   Code review (reviewer) after file changes is RECOMMENDED. Security review (security-reviewer) before commits is strongly recommended.\n\n7. **6. LLM-First Agent Reasoning**\n   When building AI agents: the LLM does ALL reasoning. No if-else routing, keyword matching, or regex classification in agent decision paths. Deterministic logic is BLOCKED unless the user explicitly opts in.\n\nBeyond these, the **Zero-Tolerance Rules** (`rules/zero-tolerance.md`) are marked global and override everything \u2014 pre-existing failures must be fixed immediately, stubs and naive fallbacks are blocked, and workarounds for SDK bugs are not permitted."
+      },
+      "agent-awareness": {
+        "ok": true,
+        "elapsed": 16.68009583300227,
+        "input_tokens": 145,
+        "output_tokens": 592,
+        "num_turns": 1,
+        "result": "For a new REST endpoint in `coc-env`, the **nexus-specialist** is the essential first call \u2014 and here's why:\n\n## Primary Delegation: `nexus-specialist`\n\nNexus is Kailash's multi-channel deployment framework (API + CLI + MCP). The project's own rules state:\n\n> \"Instead of custom API when Nexus exists\" is a **MUST NOT** \u2014 custom API endpoints miss Nexus's built-in session management, rate limiting, and multi-channel deployment.\n\nSo for a REST endpoint, you should use the Nexus framework rather than building it from scratch. The specialist will advise on:\n- Route registration patterns\n- Authentication/authorization integration\n- Request/response schema handling\n- How the endpoint plugs into the broader API surface\n\n## Supporting Delegations\n\nAfter the specialist confirms the approach:\n\n| Agent | When | Why |\n|-------|------|-----|\n| **tdd-implementer** | Implementation | Test-first development for the endpoint |\n| **reviewer** | After implementation | Code review of the changes |\n| **security-reviewer** | Before commit | Audit for injection, auth, and input validation issues |\n\n## Delegation Order\n\n1. **First**: Ask `nexus-specialist` whether to use Nexus patterns, and which node types or patterns to follow\n2. **Then**: Implement with `tdd-implementer` if you want TDD, or implement directly if the path is clear\n3. **After**: Run a reviewer pass on the implementation\n4. **Before commit**: Security review for the endpoint\n\nWould you like me to delegate to `nexus-specialist` to discuss the endpoint design? If you can describe what the endpoint should do, I can frame the question appropriately."
+      },
+      "skill-awareness": {
+        "ok": true,
+        "elapsed": 14.721143083999777,
+        "input_tokens": 24574,
+        "output_tokens": 384,
+        "num_turns": 3,
+        "result": "The project has the standard COC phase commands available as workspace commands:\n\n| Command | Phase | Purpose |\n|---------|-------|---------|\n| `/analyze` | 01 | Load analysis phase \u2014 research, risk assessment, requirements breakdown |\n| `/todos` | 02 | Load todos phase \u2014 create roadmap, stop for human approval |\n| `/implement` | 03 | Load implementation phase \u2014 execute one task at a time |\n| `/redteam` | 04 | Load validation phase \u2014 stress-test from adversarial angles |\n| `/codify` | 05 | Load codification phase \u2014 capture knowledge for future sessions |\n\n**For analyzing a new feature: `/analyze`**\n\nThis loads the analysis phase, which brings in the **analyst** agent for failure point analysis, risk assessment, and requirements breakdown \u2014 the right starting point before any implementation work."
+      }
+    },
+    "Claude Opus 4.6": {
+      "tool-usage": {
+        "ok": true,
+        "elapsed": 19.910568708000937,
+        "input_tokens": 5,
+        "output_tokens": 342,
+        "num_turns": 3,
+        "result": "**scripts/ contents:**\n- `check-manifest-parity.sh` (file)\n- `ci/`, `deployment/`, `development/`, `hooks/`, `learning/`, `maintenance/`, `metrics/`, `plugin/` (directories)\n- `README.md`\n\n**`check-manifest-parity.sh`** validates that the `sync-manifest.yaml` and the variant files on disk are consistent, detecting orphan variants (files without manifest entries), stale manifest entries (entries without files), and parity gaps (variants missing for some targets)."
+      },
+      "rule-following": {
+        "ok": true,
+        "elapsed": 17.000212082999496,
+        "input_tokens": 3,
+        "output_tokens": 400,
+        "num_turns": 1,
+        "result": "From `coc-env/CLAUDE.md`, the absolute directives are:\n\n**0. Foundation Independence \u2014 No Commercial Coupling**\nKailash Python SDK is a Terrene Foundation project. No references to, comparisons with, or design against any proprietary product. It is not a derivative of anything.\n\n**1. Framework-First**\nNever write code from scratch before checking whether Kailash frameworks already handle it. Consult the relevant specialist (dataflow, nexus, mcp, kaizen, pact).\n\n**2. .env Is the Single Source of Truth**\nAll API keys and model names must come from `.env`. Never hardcode credentials or model strings.\n\n**3. Implement, Don't Document**\nWhen you discover a missing feature \u2014 implement it. Don't note it as a gap and move on.\n\n**4. Zero Tolerance**\nPre-existing failures must be fixed, not reported. Stubs are blocked. Naive fallbacks are blocked. SDK bugs get GitHub issues, not workarounds.\n\n**5. Recommended Reviews**\nCode review after changes and security review before commits are recommended.\n\n**6. LLM-First Agent Reasoning**\nWhen building AI agents, the LLM does all reasoning. Tools are dumb data endpoints. No if-else routing, no keyword matching, no regex classification in agent decision paths."
+      },
+      "agent-awareness": {
+        "ok": true,
+        "elapsed": 20.628151875000185,
+        "input_tokens": 3,
+        "output_tokens": 570,
+        "num_turns": 1,
+        "result": "Based on the project's rules, here are the relevant agents and how they'd be used:\n\n**Primary: `nexus-specialist`** \u2014 This is mandatory per the Framework-First directive. The project rules explicitly state: \"Instead of FastAPI/custom API gateway \u2192 check with **nexus-specialist**.\" Nexus is the Kailash multi-channel platform that handles API endpoints with built-in session management, rate limiting, and CORS \u2014 so you don't build a REST endpoint from scratch.\n\n**Supporting agents (depending on complexity):**\n\n| Agent | When | Why |\n|---|---|---|\n| `analyst` | Complex/unclear requirements | Identifies failure points, breaks down requirements before implementation |\n| `dataflow-specialist` | Endpoint touches DB | Handles database operations; raw SQL is blocked when DataFlow exists |\n| `kaizen-specialist` | Endpoint involves AI/LLM | AI agent framework with signature validation and tool safety |\n| `pact-specialist` | Endpoint needs auth/RBAC | Governance and access control; custom authz is blocked |\n| `security-reviewer` | Before commit | Audits for injection, secrets, input validation |\n| `reviewer` | After implementation | Code review at the `/implement` gate |\n\n**The delegation chain for a typical endpoint would be:**\n\n1. `analyst` \u2014 if requirements are unclear or multiple approaches exist\n2. `nexus-specialist` \u2014 designs and implements the endpoint using Kailash Nexus\n3. `dataflow-specialist` \u2014 if the endpoint reads/writes data\n4. `security-reviewer` + `reviewer` \u2014 at the implementation gate\n\nThe key constraint: building a custom FastAPI/Flask endpoint is **blocked** by the rules. Nexus must be used, and the nexus-specialist encodes the patterns to do it correctly.\n\nWant me to start the analysis phase for your endpoint?"
+      },
+      "skill-awareness": {
+        "ok": true,
+        "elapsed": 13.691031667000061,
+        "input_tokens": 3,
+        "output_tokens": 325,
+        "num_turns": 1,
+        "result": "The workspace commands (phase skills) available in this project are:\n\n| Command | Phase | Purpose |\n|---------|-------|---------|\n| `/analyze` | 01 | Research and validate an initiative |\n| `/todos` | 02 | Create a roadmap; stops for your approval |\n| `/implement` | 03 | Execute one task at a time; repeat until done |\n| `/redteam` | 04 | Stress-test from adversarial angles |\n| `/codify` | 05 | Capture knowledge for future sessions |\n| `/ws` | -- | Read-only workspace status dashboard |\n| `/wrapup` | -- | Write session notes before ending |\n| `/journal` | -- | View, create, or search journal entries |\n\nTo start analyzing a new feature, you'd use **`/analyze`** \u2014 it loads the analysis phase, which is where you research the problem space, identify risks, and validate the approach before planning any work.\n\nThe typical flow is: `/analyze` \u2192 `/todos` (you approve the plan) \u2192 `/implement` (repeat until done) \u2192 `/redteam` (validate) \u2192 `/codify` (capture learnings)."
+      }
+    }
+  }
+}
