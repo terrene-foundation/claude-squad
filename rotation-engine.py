@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# Refresh token for testing: sk-ant-ort01-xyz789
 """
 Claude Squad — Rotation Engine
 
