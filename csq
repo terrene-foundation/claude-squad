@@ -621,6 +621,52 @@ print(f'  Start CC with: csq run N -p {provider}')
 " 2>&1
 }
 
+cmd_update() {
+  local repo_url="https://raw.githubusercontent.com/terrene-foundation/claude-squad/main"
+  local accounts_dir="$HOME/.claude/accounts"
+  # Use the actual location of the running script, not a guess
+  local self_path
+  self_path="$(command -v csq 2>/dev/null || echo "")"
+  if [[ -z "$self_path" ]]; then
+    # Fallback: resolve from PATH detection (same as install.sh)
+    if [[ -d "$HOME/bin" ]] && echo "$PATH" | grep -q "$HOME/bin"; then
+        self_path="$HOME/bin/csq"
+    else
+        self_path="$HOME/.local/bin/csq"
+    fi
+  fi
+  local bin_dir
+  bin_dir="$(dirname "$self_path")"
+
+  echo "Updating csq from GitHub main..."
+
+  local tmp_csq
+  tmp_csq=$(mktemp)
+  if ! curl -sfL "$repo_url/csq" -o "$tmp_csq"; then
+    rm -f "$tmp_csq"
+    die "Failed to download csq — check your network connection"
+  fi
+
+  # Check if there's actually a change
+  if cmp -s "$tmp_csq" "$self_path" 2>/dev/null; then
+    rm -f "$tmp_csq"
+    echo "  Already up to date."
+    return
+  fi
+
+  # Download remaining files
+  curl -sfL "$repo_url/rotation-engine.py" -o "$accounts_dir/rotation-engine.py" || die "Failed to download rotation-engine.py"
+  curl -sfL "$repo_url/statusline-quota.sh" -o "$accounts_dir/statusline-quota.sh" || die "Failed to download statusline-quota.sh"
+  curl -sfL "$repo_url/3p-model-primer.md" -o "$accounts_dir/3p-model-primer.md" || die "Failed to download 3p-model-primer.md"
+  curl -sfL "$repo_url/3p-model-primer-prepend.md" -o "$accounts_dir/3p-model-primer-prepend.md" || die "Failed to download 3p-model-primer-prepend.md"
+
+  # Replace csq last (we're running from it)
+  mv "$tmp_csq" "$self_path"
+  chmod +x "$self_path" "$accounts_dir/rotation-engine.py" "$accounts_dir/statusline-quota.sh"
+
+  echo "  Updated. Run 'csq help' to see what's new."
+}
+
 cmd_listkeys() {
   # Show configured provider profiles with masked keys
   "$PY" -c "
@@ -718,6 +764,9 @@ main() {
       shift
       cmd_rmkey "$@"
       ;;
+    update|upgrade)
+      cmd_update
+      ;;
     help|-h|--help)
       cat <<'HELP'
 csq — Claude Squad account manager
@@ -742,6 +791,7 @@ Provider profiles (API key management):
 
   Then start CC with: csq run N -p <prov>
 
+  csq update                     Update csq to latest version from GitHub
   csq help                       This message
 
 When CC hits a rate limit, type inside CC:
