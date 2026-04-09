@@ -388,6 +388,13 @@ with open(output_path, 'w') as f:
   local profile_label=""
   [[ -n "$profile" ]] && profile_label=" [profile: $profile]"
   echo "Starting Claude Code on account $n${email:+ ($email)}${profile_label}"
+
+  # Strip shell-level auth env vars. csq manages auth exclusively through
+  # .credentials.json (OAuth) and settings.json env section (profiles).
+  # Stale shell vars (e.g. ANTHROPIC_API_KEY from .bashrc) conflict with
+  # the profile's ANTHROPIC_AUTH_TOKEN, triggering CC's auth-conflict warning.
+  unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN 2>/dev/null
+
   exec env CLAUDE_CONFIG_DIR="$config_dir" claude ${claude_args[@]+"${claude_args[@]}"}
 }
 
