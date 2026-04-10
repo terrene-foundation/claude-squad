@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["csq-core", "csq-cli"]
+members = ["csq-core", "csq-cli", "csq-desktop/src-tauri"]
 
 [workspace.package]
 version = "2.0.0-alpha.1"
