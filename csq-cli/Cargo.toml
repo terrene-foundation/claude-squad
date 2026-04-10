@@ -12,6 +12,7 @@ path = "src/main.rs"
 csq-core = { path = "../csq-core" }
 anyhow.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
