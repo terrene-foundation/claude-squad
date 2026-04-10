@@ -149,6 +149,10 @@ pub fn spawn_with_config(
 ) -> PollerHandle {
     let cooldowns: Arc<Mutex<HashMap<u16, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let backoffs: Arc<Mutex<HashMap<u16, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Separate maps for 3P accounts so synthetic IDs (901, 902)
+    // don't collide with Anthropic account IDs in the same range.
+    let cooldowns_3p: Arc<Mutex<HashMap<u16, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    let backoffs_3p: Arc<Mutex<HashMap<u16, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let join = tokio::spawn(async move {
         run_loop(RunLoopConfig {
@@ -157,6 +161,8 @@ pub fn spawn_with_config(
             http_post_probe,
             cooldowns,
             backoffs,
+            cooldowns_3p,
+            backoffs_3p,
             shutdown,
             interval,
             interval_3p,
@@ -173,8 +179,13 @@ struct RunLoopConfig {
     base_dir: PathBuf,
     http_get: HttpGetFn,
     http_post_probe: HttpPostProbeFn,
+    /// Cooldown/backoff maps for Anthropic accounts (IDs 1..999).
     cooldowns: Arc<Mutex<HashMap<u16, Instant>>>,
     backoffs: Arc<Mutex<HashMap<u16, u32>>>,
+    /// Separate maps for 3P accounts (synthetic IDs 901, 902) to
+    /// prevent ID collision with Anthropic accounts in the same range.
+    cooldowns_3p: Arc<Mutex<HashMap<u16, Instant>>>,
+    backoffs_3p: Arc<Mutex<HashMap<u16, u32>>>,
     shutdown: CancellationToken,
     interval: Duration,
     interval_3p: Duration,
@@ -204,7 +215,7 @@ async fn run_loop(cfg: RunLoopConfig) {
         tick(&cfg.base_dir, &cfg.http_get, &cfg.cooldowns, &cfg.backoffs).await;
 
         if last_3p_tick.elapsed() >= cfg.interval_3p {
-            tick_3p(&cfg.base_dir, &cfg.http_post_probe, &cfg.cooldowns, &cfg.backoffs).await;
+            tick_3p(&cfg.base_dir, &cfg.http_post_probe, &cfg.cooldowns_3p, &cfg.backoffs_3p).await;
             last_3p_tick = Instant::now();
         }
 

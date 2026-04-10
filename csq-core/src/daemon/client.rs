@@ -128,10 +128,7 @@ pub fn http_get_unix_with_timeout(
     path_and_query: &str,
     timeout: Duration,
 ) -> Result<DaemonResponse, DaemonClientError> {
-    debug_assert!(
-        path_and_query.starts_with('/'),
-        "path_and_query must start with '/'"
-    );
+    validate_path_and_query(path_and_query)?;
 
     let mut stream = UnixStream::connect(sock_path).map_err(DaemonClientError::Connect)?;
     stream
@@ -184,10 +181,7 @@ pub fn http_post_unix(
     sock_path: &Path,
     path_and_query: &str,
 ) -> Result<DaemonResponse, DaemonClientError> {
-    debug_assert!(
-        path_and_query.starts_with('/'),
-        "path_and_query must start with '/'"
-    );
+    validate_path_and_query(path_and_query)?;
 
     let mut stream = UnixStream::connect(sock_path).map_err(DaemonClientError::Connect)?;
     stream
@@ -224,6 +218,26 @@ pub fn http_post_unix(
     }
 
     parse_response(&buf)
+}
+
+/// Validates `path_and_query` for HTTP request-line safety.
+///
+/// Rejects CRLF characters (`\r`, `\n`) to prevent HTTP header
+/// injection. Also rejects paths not starting with `/`. This is a
+/// runtime check (not `debug_assert!`) because the function is `pub`
+/// and future callers may pass dynamic paths.
+fn validate_path_and_query(path_and_query: &str) -> Result<(), DaemonClientError> {
+    if !path_and_query.starts_with('/') {
+        return Err(DaemonClientError::MalformedResponse(
+            "path_and_query must start with '/'".to_string(),
+        ));
+    }
+    if path_and_query.contains('\r') || path_and_query.contains('\n') {
+        return Err(DaemonClientError::MalformedResponse(
+            "path_and_query must not contain CR or LF".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Parses a minimal HTTP/1.1 response buffer into a
@@ -446,5 +460,40 @@ mod tests {
             DaemonClientError::Connect(_) => {}
             other => panic!("expected Connect error, got {other:?}"),
         }
+    }
+
+    // ─── CRLF injection regression tests ────────────────────
+
+    #[test]
+    fn validate_rejects_crlf_in_path() {
+        let err = validate_path_and_query("/api/health\r\nEvil-Header: value").unwrap_err();
+        match err {
+            DaemonClientError::MalformedResponse(s) => assert!(s.contains("CR or LF")),
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bare_newline() {
+        let err = validate_path_and_query("/api/health\nEvil: header").unwrap_err();
+        match err {
+            DaemonClientError::MalformedResponse(s) => assert!(s.contains("CR or LF")),
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_missing_leading_slash() {
+        let err = validate_path_and_query("api/health").unwrap_err();
+        match err {
+            DaemonClientError::MalformedResponse(s) => assert!(s.contains("start with '/'")),
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_path() {
+        assert!(validate_path_and_query("/api/health").is_ok());
+        assert!(validate_path_and_query("/api/login/3?foo=bar").is_ok());
     }
 }

@@ -111,10 +111,19 @@ pub fn discover_third_party(base_dir: &Path) -> Vec<AccountInfo> {
         let path = base_dir.join(file);
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                // Check for ANTHROPIC_AUTH_TOKEN or similar key
-                if json.get("ANTHROPIC_AUTH_TOKEN").is_some()
-                    || json.get("ANTHROPIC_BASE_URL").is_some()
-                {
+                // Check for ANTHROPIC_AUTH_TOKEN at the top level OR
+                // inside the `env` subobject (which is where
+                // ProviderSettings::get_api_key reads from).
+                let has_top_level = json.get("ANTHROPIC_AUTH_TOKEN").is_some()
+                    || json.get("ANTHROPIC_BASE_URL").is_some();
+                let has_env_key = json
+                    .get("env")
+                    .and_then(|env| {
+                        env.get("ANTHROPIC_AUTH_TOKEN")
+                            .or_else(|| env.get("ANTHROPIC_BASE_URL"))
+                    })
+                    .is_some();
+                if has_top_level || has_env_key {
                     accounts.push(AccountInfo {
                         id: *synthetic_id,
                         label: provider.to_string(),
@@ -282,6 +291,24 @@ mod tests {
                 provider: "Z.AI".into()
             }
         );
+    }
+
+    #[test]
+    fn discover_third_party_env_nested_key() {
+        // Regression test: settings files with keys ONLY in the `env`
+        // subobject (the canonical location per ProviderSettings)
+        // must still be discovered.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("settings-mm.json"),
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"key","ANTHROPIC_BASE_URL":"https://api.mm.com"}}"#,
+        )
+        .unwrap();
+
+        let accounts = discover_third_party(dir.path());
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].label, "MiniMax");
+        assert_eq!(accounts[0].id, 902);
     }
 
     #[test]
