@@ -175,6 +175,57 @@ pub fn http_get_unix_with_timeout(
     parse_response(&buf)
 }
 
+/// Issues a `POST path_and_query` with an empty body against the
+/// daemon's Unix socket. Used by `csq swap` to notify the daemon
+/// to invalidate its caches.
+///
+/// Same timeout and security properties as [`http_get_unix`].
+pub fn http_post_unix(
+    sock_path: &Path,
+    path_and_query: &str,
+) -> Result<DaemonResponse, DaemonClientError> {
+    debug_assert!(
+        path_and_query.starts_with('/'),
+        "path_and_query must start with '/'"
+    );
+
+    let mut stream = UnixStream::connect(sock_path).map_err(DaemonClientError::Connect)?;
+    stream
+        .set_read_timeout(Some(DEFAULT_TIMEOUT))
+        .map_err(DaemonClientError::Io)?;
+    stream
+        .set_write_timeout(Some(DEFAULT_TIMEOUT))
+        .map_err(DaemonClientError::Io)?;
+
+    let request = format!(
+        "POST {path_and_query} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(DaemonClientError::Io)?;
+
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len() + n > MAX_RESPONSE_BYTES {
+                    return Err(DaemonClientError::ResponseTooLarge);
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) => return Err(DaemonClientError::Io(e)),
+        }
+    }
+
+    parse_response(&buf)
+}
+
 /// Parses a minimal HTTP/1.1 response buffer into a
 /// [`DaemonResponse`]. Split into its own function for unit tests.
 ///
@@ -349,6 +400,40 @@ mod tests {
         let resp = http_get_unix(&path, "/api/login/3").unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body.contains("\"status\":\"ok\""));
+        server.join().unwrap();
+    }
+
+    /// End-to-end: bind a throwaway Unix socket, serve a fixed
+    /// response on the first POST, verify the client parses it.
+    #[test]
+    fn http_post_unix_round_trip() {
+        use std::os::unix::net::UnixListener;
+        use std::thread;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = [0u8; 512];
+            let _ = conn.read(&mut req).unwrap();
+            let body = r#"{"cleared":true}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 content-type: application/json\r\n\
+                 content-length: {}\r\n\
+                 connection: close\r\n\
+                 \r\n\
+                 {}",
+                body.len(),
+                body
+            );
+            conn.write_all(resp.as_bytes()).unwrap();
+        });
+
+        let resp = http_post_unix(&path, "/api/invalidate-cache").unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.contains("\"cleared\":true"));
         server.join().unwrap();
     }
 

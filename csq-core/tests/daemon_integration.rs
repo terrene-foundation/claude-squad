@@ -15,7 +15,7 @@
 use csq_core::credentials::{self, CredentialFile, OAuthPayload};
 use csq_core::daemon::{
     cache::TtlCache,
-    client::{http_get_unix, http_get_unix_with_timeout},
+    client::{http_get_unix, http_get_unix_with_timeout, http_post_unix},
     server::{serve, RouterState, DISCOVERY_CACHE_MAX_AGE},
 };
 use csq_core::oauth::OAuthStateStore;
@@ -172,6 +172,45 @@ async fn client_unknown_route_404() {
     with_server(dir.path(), |sock| async move {
         let resp = http_get_unix(&sock, "/api/nonexistent").unwrap();
         assert_eq!(resp.status, 404);
+    })
+    .await;
+}
+
+// ─── Cache invalidation ─────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_invalidate_cache_returns_200() {
+    let dir = TempDir::new().unwrap();
+    with_server(dir.path(), |sock| async move {
+        let resp = http_post_unix(&sock, "/api/invalidate-cache").unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(resp.body.contains("\"cleared\":true"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_invalidate_cache_clears_discovery() {
+    let dir = TempDir::new().unwrap();
+    install_creds(dir.path(), 1);
+
+    with_server(dir.path(), |sock| async move {
+        // Warm the discovery cache
+        let resp1 = http_get_unix(&sock, "/api/accounts").unwrap();
+        assert_eq!(resp1.status, 200);
+        let json1: serde_json::Value = serde_json::from_str(&resp1.body).unwrap();
+        assert_eq!(json1["accounts"].as_array().unwrap().len(), 1);
+
+        // Invalidate the cache
+        let resp_inv = http_post_unix(&sock, "/api/invalidate-cache").unwrap();
+        assert_eq!(resp_inv.status, 200);
+
+        // Next /api/accounts call should re-discover (still sees 1 account
+        // since we didn't change the filesystem, but the cache was cleared)
+        let resp2 = http_get_unix(&sock, "/api/accounts").unwrap();
+        assert_eq!(resp2.status, 200);
+        let json2: serde_json::Value = serde_json::from_str(&resp2.body).unwrap();
+        assert_eq!(json2["accounts"].as_array().unwrap().len(), 1);
     })
     .await;
 }
