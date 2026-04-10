@@ -4,12 +4,15 @@ use super::CredentialFile;
 use crate::error::OAuthError;
 use crate::types::{AccessToken, RefreshToken};
 use serde::Deserialize;
+use std::fmt;
 
 /// Anthropic OAuth token endpoint.
 pub const TOKEN_ENDPOINT: &str = "https://platform.claude.com/v1/oauth/token";
 
 /// Response from the Anthropic OAuth token endpoint.
-#[derive(Debug, Deserialize)]
+///
+/// Custom Debug impl masks token values to prevent accidental logging.
+#[derive(Deserialize)]
 pub struct RefreshResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -18,6 +21,17 @@ pub struct RefreshResponse {
     /// Sometimes returned; we ignore it in favor of the existing scopes.
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+impl fmt::Debug for RefreshResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RefreshResponse")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Merges a refresh response into an existing credential file.
