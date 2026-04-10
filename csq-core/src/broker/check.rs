@@ -73,6 +73,26 @@ where
         }
     };
 
+    // CRITICAL: Re-read canonical INSIDE the lock to prevent token ping-pong.
+    // Another process may have refreshed between our first read and lock acquisition.
+    // If we don't re-read, we'd call refresh with a stale RT that Anthropic has
+    // already invalidated, forcing recovery and potentially corrupting state.
+    let creds = match credentials::load(&canonical_path) {
+        Ok(c) => c,
+        Err(e) => {
+            drop(guard);
+            return Err(CsqError::Credential(e));
+        }
+    };
+    if !creds
+        .claude_ai_oauth
+        .is_expired_within(REFRESH_WINDOW_SECS)
+    {
+        debug!(account = %account, "another process refreshed already, returning Valid");
+        drop(guard);
+        return Ok(BrokerResult::Valid);
+    }
+
     // Attempt refresh
     match do_refresh(base_dir, account, &creds, http_post.clone()) {
         Ok(()) => {
@@ -172,8 +192,11 @@ where
         match do_refresh(base_dir, account, &live, http_post) {
             Ok(()) => return Ok(()),
             Err(_) => {
-                // Restore original and report failure
-                let _ = credentials::save(&canonical_path, &original);
+                // Restore original ONLY if the current canonical is not newer
+                // than our snapshot — prevents downgrade attacks / races
+                // where another process successfully refreshed while we were
+                // trying a sibling.
+                restore_if_not_downgraded(&canonical_path, &original);
                 return Err(CsqError::Broker(BrokerError::RecoveryFailed {
                     account: account.get(),
                     tried,
@@ -182,13 +205,29 @@ where
         }
     }
 
-    // Total failure — restore original canonical
-    let _ = credentials::save(&canonical_path, &original);
+    // Total failure — restore original (with monotonicity guard)
+    restore_if_not_downgraded(&canonical_path, &original);
 
     Err(CsqError::Broker(BrokerError::RecoveryFailed {
         account: account.get(),
         tried,
     }))
+}
+
+/// Restores `original` to the canonical path ONLY if the current canonical
+/// is not already newer. Prevents downgrade attacks and concurrent-refresh
+/// races where another process successfully refreshed while we were in
+/// the recovery path.
+fn restore_if_not_downgraded(canonical_path: &Path, original: &CredentialFile) {
+    if let Ok(current) = credentials::load(canonical_path) {
+        if current.claude_ai_oauth.expires_at > original.claude_ai_oauth.expires_at {
+            debug!(
+                "skipping recovery restore: canonical is newer than original snapshot"
+            );
+            return;
+        }
+    }
+    let _ = credentials::save(canonical_path, original);
 }
 
 #[cfg(test)]

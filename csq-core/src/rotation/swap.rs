@@ -58,36 +58,6 @@ pub fn swap_to(
     })
 }
 
-/// Performs a delayed verification check.
-///
-/// Called +2s after `swap_to`. If CC detected stale credentials and
-/// re-fetched, the access token will differ from what we wrote. This
-/// function logs a warning but does not retry.
-///
-/// Returns `true` if the swap is still intact, `false` if CC overwrote it.
-pub fn verify_swap_after_delay(
-    config_dir: &Path,
-    expected_access_token: &str,
-) -> bool {
-    let live_path = config_dir.join(".credentials.json");
-    match credentials::load(&live_path) {
-        Ok(creds) => {
-            let intact = creds.claude_ai_oauth.access_token.expose_secret() == expected_access_token;
-            if !intact {
-                warn!(
-                    config_dir = %config_dir.display(),
-                    "delayed swap verification: CC overwrote credentials"
-                );
-            }
-            intact
-        }
-        Err(e) => {
-            warn!(error = %e, "delayed swap verification: failed to read live creds");
-            false
-        }
-    }
-}
-
 /// Result of a successful swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapResult {
@@ -176,27 +146,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn verify_swap_after_delay_intact() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join("config-1");
-        std::fs::create_dir_all(&config).unwrap();
-
-        let creds = make_creds("at-expected", "rt-1");
-        credentials::save(&config.join(".credentials.json"), &creds).unwrap();
-
-        assert!(verify_swap_after_delay(&config, "at-expected"));
-    }
-
-    #[test]
-    fn verify_swap_after_delay_overwritten() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join("config-1");
-        std::fs::create_dir_all(&config).unwrap();
-
-        let creds = make_creds("at-different", "rt-1");
-        credentials::save(&config.join(".credentials.json"), &creds).unwrap();
-
-        assert!(!verify_swap_after_delay(&config, "at-expected"));
-    }
 }

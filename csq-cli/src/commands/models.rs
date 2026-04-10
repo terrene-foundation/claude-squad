@@ -1,10 +1,10 @@
-//! `csq models [provider]` — list models grouped by provider.
+//! `csq models list [provider]` — list models. `csq models switch <provider> <model>` — switch.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use csq_core::providers::{self, ModelCatalog};
 use std::path::Path;
 
-pub fn handle(_base_dir: &Path, provider_filter: &str) -> Result<()> {
+pub fn handle_list(_base_dir: &Path, provider_filter: &str) -> Result<()> {
     let catalog = ModelCatalog::default_catalog();
 
     println!();
@@ -20,7 +20,6 @@ pub fn handle(_base_dir: &Path, provider_filter: &str) -> Result<()> {
                 println!("  {} — {}", m.id, m.name);
             }
             if provider.id == "ollama" {
-                // Live query ollama
                 let live = providers::ollama::get_ollama_models();
                 if live.is_empty() && models.is_empty() {
                     println!("  (ollama not installed or no models)");
@@ -33,18 +32,15 @@ pub fn handle(_base_dir: &Path, provider_filter: &str) -> Result<()> {
             println!();
         }
     } else {
-        let provider = providers::get_provider(provider_filter);
-        if provider.is_none() {
-            return Err(anyhow::anyhow!("unknown provider: {provider_filter}"));
-        }
+        let provider = providers::get_provider(provider_filter)
+            .ok_or_else(|| anyhow!("unknown provider: {provider_filter}"))?;
 
-        let p = provider.unwrap();
-        println!("{} ({})", p.name, p.id);
-        let models = catalog.by_provider(p.id);
+        println!("{} ({})", provider.name, provider.id);
+        let models = catalog.by_provider(provider.id);
         for m in &models {
             println!("  {} — {}", m.id, m.name);
         }
-        if p.id == "ollama" {
+        if provider.id == "ollama" {
             for name in providers::ollama::get_ollama_models() {
                 println!("  {name}");
             }
@@ -53,4 +49,44 @@ pub fn handle(_base_dir: &Path, provider_filter: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn handle_switch(base_dir: &Path, provider_id: &str, model_query: &str) -> Result<()> {
+    // Verify provider exists
+    providers::get_provider(provider_id)
+        .ok_or_else(|| anyhow!("unknown provider: {provider_id}"))?;
+
+    // Resolve model
+    let catalog = ModelCatalog::default_catalog();
+    let model = catalog.find(model_query).ok_or_else(|| {
+        let suggestion = catalog
+            .suggest(model_query)
+            .map(|m| format!(" (did you mean {}?)", m.id))
+            .unwrap_or_default();
+        anyhow!("unknown model: {model_query}{suggestion}")
+    })?;
+
+    if model.provider != provider_id {
+        return Err(anyhow!(
+            "model {} belongs to provider {}, not {}",
+            model.id, model.provider, provider_id
+        ));
+    }
+
+    // Load, update, save
+    let mut settings = providers::settings::load_settings(base_dir, provider_id)?;
+    settings.set_model(&model.id);
+    providers::settings::save_settings(base_dir, &settings)?;
+
+    println!(
+        "Switched {} model to {} ({})",
+        provider_id, model.id, model.name
+    );
+    Ok(())
+}
+
+// Kept for backward compat with the old single-arg CLI entry
+#[allow(dead_code)]
+pub fn handle(base_dir: &Path, provider_filter: &str) -> Result<()> {
+    handle_list(base_dir, provider_filter)
 }

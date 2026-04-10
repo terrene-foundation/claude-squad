@@ -72,12 +72,14 @@ impl ProviderSettings {
         self.settings = set_model(&self.settings, model_id);
     }
 
-    /// Returns a fingerprint of the API key (first 8 + last 6 chars) or "(none)".
+    /// Returns a masked fingerprint of the API key: "prefix6...suffix4".
+    /// Keys under 20 chars display as "(short)" to avoid revealing too
+    /// much of the key space.
     pub fn key_fingerprint(&self) -> String {
         match self.get_api_key() {
             None => "(none)".into(),
-            Some(k) if k.len() < 16 => "(short)".into(),
-            Some(k) => format!("{}...{}", &k[..8], &k[k.len() - 6..]),
+            Some(k) if k.len() < 20 => "(short)".into(),
+            Some(k) => format!("{}...{}", &k[..6], &k[k.len() - 4..]),
         }
     }
 }
@@ -184,7 +186,7 @@ pub fn save_settings(
         std::fs::create_dir_all(parent).ok();
     }
 
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| ConfigError::InvalidJson {
         path: tmp.clone(),
         reason: format!("write: {e}"),
@@ -315,13 +317,24 @@ mod tests {
     fn fingerprint_masks_key() {
         let dir = TempDir::new().unwrap();
         let mut s = load_settings(dir.path(), "mm").unwrap();
-        s.set_api_key("abcdef0123456789xyz").unwrap();
+        // 24-char key: abcdef012345678901234xyz
+        //   first 6 = "abcdef"
+        //   last  4 = "4xyz"
+        s.set_api_key("abcdef012345678901234xyz").unwrap();
 
         let fp = s.key_fingerprint();
-        assert!(fp.contains("abcdef01"));
-        assert!(fp.contains("789xyz"));
-        assert!(fp.contains("..."));
-        assert!(!fp.contains("0123456789"));
+        assert_eq!(fp, "abcdef...4xyz");
+        // Middle is not leaked
+        assert!(!fp.contains("012345678"));
+    }
+
+    #[test]
+    fn fingerprint_short_key_hidden() {
+        let dir = TempDir::new().unwrap();
+        let mut s = load_settings(dir.path(), "mm").unwrap();
+        // 19-char key (under 20 threshold)
+        s.set_api_key("abcdef01234567890xy").unwrap();
+        assert_eq!(s.key_fingerprint(), "(short)");
     }
 
     #[test]

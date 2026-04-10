@@ -48,7 +48,7 @@ pub fn read_live_pid(config_dir: &Path) -> Option<u32> {
 /// Writes the `.live-pid` file.
 pub fn write_live_pid(config_dir: &Path, pid: u32) -> Result<(), CredentialError> {
     let path = config_dir.join(".live-pid");
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, pid.to_string().as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),
         source: e,
@@ -71,7 +71,7 @@ fn write_account_marker(path: &Path, account: AccountNum) -> Result<(), Credenti
         std::fs::create_dir_all(parent).ok();
     }
 
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(path);
     std::fs::write(&tmp, account.to_string().as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),
         source: e,

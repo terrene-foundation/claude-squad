@@ -38,7 +38,7 @@ pub fn mark_onboarding_complete(config_dir: &Path) -> Result<(), CredentialError
     })?;
 
     // Atomic write
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),
         source: e,

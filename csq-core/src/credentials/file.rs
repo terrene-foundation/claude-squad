@@ -55,8 +55,9 @@ pub fn save(path: &Path, creds: &CredentialFile) -> Result<(), CredentialError> 
     }
 
     // Use a unique temp file name to prevent race conditions when
-    // multiple callers save to the same path concurrently.
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // multiple callers save to the same path concurrently (per-PID
+    // AND per-thread via atomic counter).
+    let tmp = crate::platform::fs::unique_tmp_path(path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),
         source: e,

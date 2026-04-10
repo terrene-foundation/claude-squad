@@ -88,7 +88,7 @@ pub fn save(path: &Path, profiles: &ProfilesFile) -> Result<(), ConfigError> {
         std::fs::create_dir_all(parent).ok();
     }
 
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| ConfigError::InvalidJson {
         path: tmp.clone(),
         reason: format!("write: {e}"),
