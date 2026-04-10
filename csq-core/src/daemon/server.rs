@@ -63,7 +63,7 @@ use crate::types::AccountNum;
 use axum::{
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -155,6 +155,7 @@ pub struct HealthResponse {
 /// - `GET /api/refresh-status` — all refresh statuses from the cache (M8.5)
 /// - `GET /api/refresh-status/:id` — one account's refresh status (M8.5)
 /// - `GET /api/login/:id` — initiate an OAuth login flow (M8.7b)
+/// - `POST /api/invalidate-cache` — clear all caches (M8-10c)
 ///
 /// The [`DefaultBodyLimit`] layer is installed here so every future
 /// route inherits the 1 MiB cap without having to remember. State
@@ -167,6 +168,7 @@ pub fn router(state: RouterState) -> Router {
         .route("/api/refresh-status", get(refresh_status_all_handler))
         .route("/api/refresh-status/{id}", get(refresh_status_one_handler))
         .route("/api/login/{id}", get(login_handler))
+        .route("/api/invalidate-cache", post(invalidate_cache_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
 }
@@ -353,6 +355,29 @@ async fn login_handler(
             "oauth login initiation failed".to_string(),
         )
     })
+}
+
+/// POST /api/invalidate-cache — clears all daemon caches.
+///
+/// Called by `csq swap` after a successful account switch so that
+/// subsequent `/api/accounts` and `/api/refresh-status` calls
+/// reflect the new active account immediately instead of waiting
+/// for the 5-second TTL to expire.
+///
+/// Returns `200 {"cleared": true}` unconditionally.
+async fn invalidate_cache_handler(
+    State(state): State<RouterState>,
+) -> Json<InvalidateCacheResponse> {
+    state.discovery_cache.clear();
+    state.cache.clear();
+    tracing::debug!("cache invalidated by client request");
+    Json(InvalidateCacheResponse { cleared: true })
+}
+
+/// Response body for `POST /api/invalidate-cache`.
+#[derive(Debug, Clone, Serialize)]
+pub struct InvalidateCacheResponse {
+    pub cleared: bool,
 }
 
 /// Response body for `GET /api/accounts`.

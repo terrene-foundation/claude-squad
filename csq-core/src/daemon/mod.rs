@@ -44,7 +44,8 @@ pub use usage_poller::{spawn as spawn_usage_poller, HttpGetFn, HttpPostProbeFn, 
 
 #[cfg(unix)]
 pub use client::{
-    http_get_unix, http_get_unix_with_timeout, DaemonClientError, DaemonResponse, DEFAULT_TIMEOUT,
+    http_get_unix, http_get_unix_with_timeout, http_post_unix, DaemonClientError, DaemonResponse,
+    DEFAULT_TIMEOUT,
 };
 #[cfg(unix)]
 pub use oauth_callback::{serve as serve_oauth_callback, CallbackHandle, CallbackState};
