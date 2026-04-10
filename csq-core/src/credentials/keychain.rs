@@ -66,56 +66,95 @@ pub fn read(config_dir: &Path) -> Option<CredentialFile> {
 
 // ── macOS implementation ──────────────────────────────────────────────
 
+/// Keychain operation timeout in seconds (matches v1.x `subprocess.run(..., timeout=3)`).
+#[cfg(target_os = "macos")]
+const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Runs a `security` CLI command with a 3-second timeout.
+/// Returns stdout on success, PlatformError on failure or timeout.
+#[cfg(target_os = "macos")]
+fn run_security_command(args: &[&str]) -> Result<Vec<u8>, PlatformError> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("security")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| PlatformError::Keychain(format!("security command: {e}")))?;
+
+    // Poll with 100ms intervals up to the timeout
+    let poll_interval = std::time::Duration::from_millis(100);
+    let deadline = std::time::Instant::now() + KEYCHAIN_TIMEOUT;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited — read its output
+                let mut stdout = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout);
+                }
+                if status.success() {
+                    return Ok(stdout);
+                } else {
+                    let mut stderr = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_string(&mut stderr);
+                    }
+                    return Err(PlatformError::Keychain(format!(
+                        "security command failed: {stderr}"
+                    )));
+                }
+            }
+            Ok(None) => {
+                // Still running
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PlatformError::Keychain(
+                        "keychain operation timed out (3s)".into(),
+                    ));
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => return Err(PlatformError::Keychain(format!("wait failed: {e}"))),
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn write_impl(service: &str, creds: &CredentialFile) -> Result<(), PlatformError> {
     let json = serde_json::to_string(creds)
         .map_err(|e| PlatformError::Keychain(format!("serialize: {e}")))?;
     let hex_payload = hex::encode(json.as_bytes());
 
-    // Use `security` CLI with 3-second timeout (matches v1.x behavior).
-    // -U flag updates existing entry or creates new one.
-    let output = std::process::Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            service,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-            &hex_payload,
-        ])
-        .output()
-        .map_err(|e| PlatformError::Keychain(format!("security command: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PlatformError::Keychain(format!(
-            "security add-generic-password failed: {stderr}"
-        )));
-    }
+    run_security_command(&[
+        "add-generic-password",
+        "-U",
+        "-s",
+        service,
+        "-a",
+        KEYCHAIN_ACCOUNT,
+        "-w",
+        &hex_payload,
+    ])?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn read_impl(service: &str) -> Result<CredentialFile, PlatformError> {
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-        ])
-        .output()
-        .map_err(|e| PlatformError::Keychain(format!("security command: {e}")))?;
+    let stdout = run_security_command(&[
+        "find-generic-password",
+        "-s",
+        service,
+        "-a",
+        KEYCHAIN_ACCOUNT,
+        "-w",
+    ])?;
 
-    if !output.status.success() {
-        return Err(PlatformError::Keychain("entry not found".into()));
-    }
-
-    let hex_payload = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let hex_payload = String::from_utf8_lossy(&stdout).trim().to_string();
     let bytes = hex::decode(&hex_payload)
         .map_err(|e| PlatformError::Keychain(format!("hex decode: {e}")))?;
     let json = String::from_utf8(bytes)

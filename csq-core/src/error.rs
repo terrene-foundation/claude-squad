@@ -1,6 +1,32 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Sanitize HTTP response bodies to prevent token leaks in error messages.
+/// Truncates to 200 chars and redacts known token patterns.
+fn sanitize_body(body: &str) -> String {
+    let truncated = if body.len() > 200 {
+        format!("{}...[truncated]", &body[..200])
+    } else {
+        body.to_string()
+    };
+    redact_tokens(&truncated)
+}
+
+/// Replaces token-like strings (sk-ant-oat01-... / sk-ant-ort01-...) with [REDACTED].
+fn redact_tokens(s: &str) -> String {
+    let mut result = s.to_string();
+    for prefix in ["sk-ant-oat01-", "sk-ant-ort01-"] {
+        while let Some(start) = result.find(prefix) {
+            let end = result[start..]
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',')
+                .map(|i| start + i)
+                .unwrap_or(result.len());
+            result.replace_range(start..end, "[REDACTED]");
+        }
+    }
+    result
+}
+
 /// Top-level error type for csq operations.
 ///
 /// Used at CLI and Tauri command boundaries. Each variant wraps
@@ -106,7 +132,7 @@ pub enum BrokerError {
 
 #[derive(Error, Debug)]
 pub enum OAuthError {
-    #[error("http error: {status} {body}")]
+    #[error("http error: {status} {}", sanitize_body(body))]
     Http { status: u16, body: String },
 
     #[error("state token expired (TTL {ttl_secs}s exceeded)")]

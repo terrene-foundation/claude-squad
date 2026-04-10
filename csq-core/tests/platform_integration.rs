@@ -4,7 +4,7 @@
 //! contention, and process lifecycle detection.
 
 use csq_core::platform::fs::{atomic_replace, secure_file};
-use csq_core::platform::lock::lock_file;
+use csq_core::platform::lock::{lock_file, try_lock_file};
 use csq_core::platform::process::{is_cc_command, is_pid_alive};
 use std::fs;
 use tempfile::TempDir;
@@ -56,6 +56,42 @@ fn lock_released_after_drop_allows_child() {
     // Child should now acquire it
     let result = perl_try_flock(&lock_path);
     assert_eq!(result, "acquired", "child should acquire after drop");
+}
+
+#[cfg(unix)]
+#[test]
+fn try_lock_returns_none_when_held_cross_process() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let dir = TempDir::new().unwrap();
+    let lock_path = dir.path().join("try_lock.lock");
+
+    // Spawn a child that holds a flock and signals readiness via stdout
+    let mut child = Command::new("perl")
+        .arg("-e")
+        .arg(format!(
+            r#"use Fcntl qw(:flock); open(my $fh, ">", "{}") or die "open: $!"; flock($fh, LOCK_EX) or die "flock: $!"; print "locked\n"; STDOUT->flush(); sleep 30;"#,
+            lock_path.display()
+        ))
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("perl should be available");
+
+    // Wait for child to signal it holds the lock
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "locked");
+
+    // Now try_lock_file should return None since the child holds the lock
+    let result = try_lock_file(&lock_path).unwrap();
+    assert!(result.is_none(), "try_lock_file should return None when lock is held by another process");
+
+    // Clean up
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 // ── Atomic writes under contention ────────────────────────────────────

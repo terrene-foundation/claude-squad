@@ -16,7 +16,6 @@ config-*/
 
 # Rust build artifacts
 target/
-Cargo.lock
 
 # Local-only research and notes folders
 notes/

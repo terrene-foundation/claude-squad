@@ -5,7 +5,7 @@
 
 use csq_core::credentials::file::{canonical_path, live_path, load, save, save_canonical};
 use csq_core::credentials::keychain::service_name;
-use csq_core::credentials::refresh::{merge_refresh, RefreshResponse};
+use csq_core::credentials::refresh::{merge_refresh, refresh_token, RefreshResponse, TOKEN_ENDPOINT};
 use csq_core::credentials::{CredentialFile, OAuthPayload};
 use csq_core::types::{AccessToken, AccountNum, RefreshToken};
 use std::collections::HashMap;
@@ -36,26 +36,23 @@ fn sample_creds() -> CredentialFile {
 
 #[test]
 fn keychain_service_name_known_paths() {
-    // Verify deterministic output for known paths
-    let paths_and_expected_prefix = [
-        "/Users/test/.claude/accounts/config-1",
-        "/Users/test/.claude/accounts/config-2",
-        "/Users/test/.claude/accounts/config-3",
-        "/home/user/.claude/accounts/config-1",
-        "/tmp/.claude/accounts/config-1",
+    // Golden values computed from v1.x Python:
+    //   hashlib.sha256(unicodedata.normalize('NFC', path).encode()).hexdigest()[:8]
+    // This is the single most critical parity test for credential migration.
+    let expected = [
+        ("/Users/test/.claude/accounts/config-1", "Claude Code-credentials-cfdcc24b"),
+        ("/Users/test/.claude/accounts/config-2", "Claude Code-credentials-550a6ea2"),
+        ("/Users/test/.claude/accounts/config-3", "Claude Code-credentials-d705092c"),
+        ("/home/user/.claude/accounts/config-1", "Claude Code-credentials-abf1dc4a"),
+        ("/tmp/.claude/accounts/config-1", "Claude Code-credentials-dbea6435"),
     ];
 
-    let mut names: Vec<String> = vec![];
-    for path in &paths_and_expected_prefix {
-        let name = service_name(std::path::Path::new(path));
-        assert!(name.starts_with("Claude Code-credentials-"));
-        assert_eq!(name.len(), "Claude Code-credentials-".len() + 8);
-        // Each path should produce a unique name
-        assert!(
-            !names.contains(&name),
-            "duplicate service name for {path}: {name}"
+    for (path, expected_name) in &expected {
+        let actual = service_name(std::path::Path::new(path));
+        assert_eq!(
+            &actual, expected_name,
+            "v1.x parity failure for path {path}: got {actual}, expected {expected_name}"
         );
-        names.push(name);
     }
 }
 
@@ -300,4 +297,100 @@ fn all_credential_files_have_600_permissions() {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "file {:?} should be 0o600", path);
     }
+}
+
+// ── save_canonical partial failure ────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn save_canonical_succeeds_when_live_dir_unwritable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let account = AccountNum::try_from(2u16).unwrap();
+
+    // Create the live config dir and make it unwritable
+    let live_dir = dir.path().join("config-2");
+    std::fs::create_dir_all(&live_dir).unwrap();
+    std::fs::set_permissions(&live_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // save_canonical should succeed — canonical write works, live fails silently
+    let result = save_canonical(dir.path(), account, &sample_creds());
+    assert!(result.is_ok(), "canonical save should succeed even when live dir is unwritable");
+
+    // Canonical file should exist
+    assert!(canonical_path(dir.path(), account).exists());
+
+    // Restore permissions for cleanup
+    std::fs::set_permissions(&live_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// ── refresh_token URL and body verification ───────────────────────────
+
+#[test]
+fn refresh_token_passes_correct_url_and_body() {
+    let existing = sample_creds();
+
+    let captured_url = std::cell::RefCell::new(String::new());
+    let captured_body = std::cell::RefCell::new(String::new());
+
+    let result = refresh_token(&existing, |url, body| {
+        *captured_url.borrow_mut() = url.to_string();
+        *captured_body.borrow_mut() = body.to_string();
+        Ok(br#"{"access_token":"new","refresh_token":"new","expires_in":18000}"#.to_vec())
+    });
+
+    assert!(result.is_ok());
+    assert_eq!(*captured_url.borrow(), TOKEN_ENDPOINT);
+
+    let body = captured_body.borrow();
+    assert!(body.starts_with("grant_type=refresh_token&refresh_token="), "body: {body}");
+    assert!(body.contains("sk-ant-ort01-integration-test"), "body should contain the refresh token");
+}
+
+// ── IPC error string mapping ──────────────────────────────────────────
+
+#[test]
+fn csq_error_ipc_mapping_coverage() {
+    use csq_core::error::*;
+
+    // NotFound -> NOT_FOUND
+    let err = CsqError::Credential(CredentialError::NotFound {
+        path: std::path::PathBuf::from("/tmp/test"),
+    });
+    let s: String = err.into();
+    assert!(s.starts_with("NOT_FOUND:"), "got: {s}");
+
+    // RefreshTokenInvalid -> LOGIN_REQUIRED
+    let err = CsqError::Broker(BrokerError::RefreshTokenInvalid { account: 1 });
+    let s: String = err.into();
+    assert!(s.starts_with("LOGIN_REQUIRED:"), "got: {s}");
+
+    // StateMismatch -> CSRF_ERROR
+    let err = CsqError::OAuth(OAuthError::StateMismatch);
+    let s: String = err.into();
+    assert!(s.starts_with("CSRF_ERROR:"), "got: {s}");
+
+    // Other -> INTERNAL_ERROR
+    let err = CsqError::Platform(PlatformError::Io(
+        std::io::Error::other("test"),
+    ));
+    let s: String = err.into();
+    assert!(s.starts_with("INTERNAL_ERROR:"), "got: {s}");
+}
+
+// ── OAuthError body sanitization ──────────────────────────────────────
+
+#[test]
+fn oauth_error_http_redacts_tokens_in_body() {
+    use csq_core::error::OAuthError;
+
+    let err = OAuthError::Http {
+        status: 401,
+        body: "invalid token: sk-ant-oat01-leaked-value and sk-ant-ort01-leaked-refresh".into(),
+    };
+    let display = format!("{err}");
+    assert!(!display.contains("leaked-value"), "access token should be redacted: {display}");
+    assert!(!display.contains("leaked-refresh"), "refresh token should be redacted: {display}");
+    assert!(display.contains("[REDACTED]"), "should contain redaction marker: {display}");
 }

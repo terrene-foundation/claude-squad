@@ -39,6 +39,7 @@ pub fn atomic_replace(tmp_path: &Path, target: &Path) -> Result<(), PlatformErro
 #[cfg(windows)]
 fn atomic_replace_windows(tmp_path: &Path, target: &Path) -> Result<(), PlatformError> {
     use std::os::windows::ffi::OsStrExt;
+    use tracing::warn;
 
     // MOVEFILE_REPLACE_EXISTING = 0x1
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;

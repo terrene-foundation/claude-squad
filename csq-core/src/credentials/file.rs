@@ -54,18 +54,22 @@ pub fn save(path: &Path, creds: &CredentialFile) -> Result<(), CredentialError> 
         })?;
     }
 
-    let tmp = path.with_extension("tmp");
+    // Use a unique temp file name to prevent race conditions when
+    // multiple callers save to the same path concurrently.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),
         source: e,
     })?;
 
-    atomic_replace(&tmp, path).map_err(|e| CredentialError::Io {
-        path: path.to_path_buf(),
+    // Set permissions on the temp file BEFORE rename so the credential
+    // file is never world-readable at its final path.
+    secure_file(&tmp).map_err(|e| CredentialError::Io {
+        path: tmp.clone(),
         source: std::io::Error::other(e.to_string()),
     })?;
 
-    secure_file(path).map_err(|e| CredentialError::Io {
+    atomic_replace(&tmp, path).map_err(|e| CredentialError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other(e.to_string()),
     })?;

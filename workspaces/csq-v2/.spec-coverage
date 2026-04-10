@@ -1,0 +1,68 @@
+# Spec Coverage Report — M0/M1/M2
+# Generated: 2026-04-10
+# Commit: post-redteam fixes
+
+## M0: Project Scaffolding (7 tasks)
+
+M0-01: Initialize Cargo workspace              → IMPLEMENTED (2 of 3 members; src-tauri deferred)
+M0-02: Initialize Tauri project skeleton        → DEFERRED (needs npm setup, P1)
+M0-03: Set up CI pipeline                       → DEFERRED (needs Rust CI workflow)
+M0-04: Configure linting and formatting         → PARTIAL (rustfmt.toml exists; clippy::pedantic, cargo deny, justfile missing)
+M0-05: Define cross-cutting types               → IMPLEMENTED (AccessToken Serialize added for credential file roundtrip — spec deviation documented)
+M0-06: Set up error handling and logging         → IMPLEMENTED
+M0-07: Harden .gitignore                        → IMPLEMENTED
+
+## M1: Platform Abstraction (8 tasks)
+
+M1-01: Platform detection module                → IMPLEMENTED
+M1-02: Secure file permissions                  → IMPLEMENTED
+M1-03: Atomic file replace                      → IMPLEMENTED
+M1-04: POSIX file locking                       → IMPLEMENTED (try_lock cross-process test added post-redteam)
+M1-05: Windows named mutex locking              → IMPLEMENTED (compile-gated, untestable without Windows CI)
+M1-06: POSIX process detection                  → IMPLEMENTED (macOS uses ps instead of sysctl — functionally equivalent)
+M1-07: Windows process detection                → IMPLEMENTED (compile-gated)
+M1-08: Integration tests                        → IMPLEMENTED (7 tests)
+
+## M2: Credential Management (9 tasks)
+
+M2-01: Credential file load/save                → IMPLEMENTED
+M2-02: Account number validation                → IMPLEMENTED (existing AccountNum newtype)
+M2-03: OAuth token refresh                      → IMPLEMENTED (injectable HTTP transport; v1.x parity verified post-redteam)
+M2-04: Keychain service name derivation          → IMPLEMENTED (v1.x parity golden values verified post-redteam)
+M2-05: Keychain write (macOS hex-encoded)        → IMPLEMENTED (uses security CLI with 3s timeout, not security-framework crate — deviation documented)
+M2-06: Keychain write (Linux/Windows)            → UNWIRED (keyring crate not added; file-based storage is primary path)
+M2-07: Credential capture (keychain read + file) → PARTIAL (macOS keychain read works; no orchestration layer combining keychain + file fallback)
+M2-08: Canonical save + config-dir mirror        → IMPLEMENTED (partial failure test added post-redteam)
+M2-09: Integration tests                        → IMPLEMENTED (12 tests)
+
+## Scope Matrix (1.1-1.17, 2.1-2.11)
+
+All 28 scope items have implementations. 26 are IMPLEMENTED, 1 PARTIAL (2.8 capture orchestration), 1 UNWIRED (2.6 Linux/Windows keychain).
+
+## GAP Resolutions
+
+GAP-1: Credential JSON Schema      → IMPLEMENTED
+GAP-2: Keychain Hex-Encoding       → IMPLEMENTED (macOS), UNWIRED (Linux/Windows)
+GAP-3: Quota JSON Schema           → DEFERRED (M5+)
+GAP-4: Error Type Hierarchy        → IMPLEMENTED
+GAP-5: Cargo Workspace Structure   → PARTIAL (missing src-tauri, reqwest, clap)
+GAP-6: Auto-Rotation Spec          → DEFERRED (M5a)
+GAP-7: profiles.json Schema        → DEFERRED (M3)
+GAP-8: Windows WAIT_ABANDONED      → IMPLEMENTED
+GAP-9: Daemon Detection Protocol   → DEFERRED (M8)
+GAP-10: OAuth State Token TTL      → DEFERRED (M9)
+
+## Red Team Fixes Applied
+
+- C1: RefreshResponse custom Debug masks tokens (was derive(Debug) with raw Strings)
+- C2: macOS keychain operations have 3-second timeout via try_wait polling (was unbounded .output())
+- C3: Temp file permissions set BEFORE rename (was after, creating world-readable window)
+- H1: Windows fs.rs warn! import added inside cfg(windows) block
+- H2: Unique temp file names per PID (was predictable .tmp suffix)
+- H3: Cargo.lock removed from .gitignore (binary crate needs reproducible builds)
+- H4: OAuthError::Http body sanitized — token prefixes redacted, body truncated to 200 chars
+- T1: Cross-process try_lock_file test added — perl holds lock, Rust try_lock returns None
+- T5: Keychain service name parity test — 5 golden values from v1.x Python SHA256 output
+- T6: save_canonical partial failure test — live dir unwritable, canonical succeeds
+- T8: refresh_token URL/body verification — captures and asserts exact endpoint + body format
+- Additional: IPC error string mapping coverage for all CsqError variants
