@@ -21,6 +21,7 @@
 use anyhow::{Context, Result};
 use csq_core::daemon::{self, DaemonStatus, PidFile};
 use csq_core::http;
+use csq_core::oauth::{OAuthStateStore, DEFAULT_REDIRECT_PORT};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,11 +73,75 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
             let refresh_cache: Arc<daemon::TtlCache<u16, daemon::RefreshStatus>> =
                 Arc::new(daemon::TtlCache::with_default_age());
 
-            // Router state: cache + base_dir, Arc'd so per-request
-            // State clones stay cheap.
+            // Create the shared OAuth state store. The /api/login/{N}
+            // handler on the Unix socket writes to it, the
+            // /oauth/callback handler on the TCP listener reads
+            // (consumes) from it. Both subsystems get the same Arc.
+            let oauth_store: Arc<OAuthStateStore> = Arc::new(OAuthStateStore::new());
+
+            // Shared shutdown token so every subsystem (server,
+            // refresher, OAuth callback) exits on the same signal.
+            let shutdown = tokio_util::sync::CancellationToken::new();
+
+            // Try to bind the OAuth callback TCP listener. If this
+            // fails (port 8420 in use), log a warning and continue
+            // without the login route — the rest of the daemon
+            // still works. The /api/login/{N} handler returns 503
+            // when oauth_store is None.
+            let http_post: daemon::HttpPostFn =
+                Arc::new(|url: &str, body: &str| http::post_form(url, body));
+            let http_post_json: daemon::HttpPostFn =
+                Arc::new(|url: &str, body: &str| http::post_json(url, body));
+            let callback_state = daemon::CallbackState {
+                store: Arc::clone(&oauth_store),
+                base_dir: Arc::new(base_dir_for_runtime.clone()),
+                http_post: Arc::clone(&http_post_json),
+                oauth_port: DEFAULT_REDIRECT_PORT,
+            };
+            let (oauth_store_for_state, oauth_port, oauth_callback_join) =
+                match daemon::serve_oauth_callback(
+                    DEFAULT_REDIRECT_PORT,
+                    callback_state,
+                    shutdown.clone(),
+                )
+                .await
+                {
+                    Ok((handle, join)) => {
+                        eprintln!(
+                            "  OAuth:    http://127.0.0.1:{}/oauth/callback",
+                            handle.port
+                        );
+                        tracing::info!(
+                            port = handle.port,
+                            "oauth callback listener bound"
+                        );
+                        (Some(Arc::clone(&oauth_store)), handle.port, Some(join))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: could not bind OAuth callback on port {}: {e}",
+                            DEFAULT_REDIRECT_PORT
+                        );
+                        eprintln!(
+                            "         `csq daemon login` will return 503 until the \
+                             port is free and the daemon is restarted."
+                        );
+                        tracing::warn!(
+                            error = %e,
+                            port = DEFAULT_REDIRECT_PORT,
+                            "oauth callback bind failed"
+                        );
+                        (None, 0u16, None)
+                    }
+                };
+
+            // Router state: cache + base_dir + OAuth handles.
+            // Arc'd so per-request State clones stay cheap.
             let router_state = daemon::server::RouterState {
                 cache: Arc::clone(&refresh_cache),
                 base_dir: Arc::new(base_dir_for_runtime.clone()),
+                oauth_store: oauth_store_for_state,
+                oauth_port,
             };
 
             match daemon::serve(&sock_path, router_state).await {
@@ -84,23 +149,28 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
                     tracing::info!("IPC server bound at {}", sock_path.display());
 
                     // Start the background refresher, sharing the
-                    // server's shutdown token so both subsystems
-                    // exit on the same signal. Passes the shared
-                    // cache so refresher writes are visible to the
-                    // HTTP routes.
-                    let http_post: daemon::HttpPostFn =
-                        Arc::new(|url: &str, body: &str| http::post_form(url, body));
+                    // outer shutdown token so it exits on the same
+                    // signal as the OAuth callback listener. The
+                    // Unix-socket server owns its own shutdown
+                    // token (cancelled via `server.shutdown()`
+                    // below) — the outer token drives the other
+                    // two subsystems.
                     let refresher = daemon::spawn_refresher(
                         base_dir_for_runtime.clone(),
                         Arc::clone(&refresh_cache),
                         http_post,
-                        server.shutdown_token(),
+                        shutdown.clone(),
                     );
 
                     // Block until SIGTERM/SIGINT arrives.
                     wait_for_shutdown().await;
 
                     eprintln!("csq daemon stopping...");
+                    // Cancel the outer token first so refresher +
+                    // oauth_callback start winding down.
+                    shutdown.cancel();
+                    // Then cancel the server's internal token so
+                    // the accept loop exits on its next poll.
                     server.shutdown();
 
                     // Await the refresher with a 5s deadline so a
@@ -122,6 +192,16 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
                         server_join,
                     )
                     .await;
+
+                    // Give the OAuth callback listener up to 5s to
+                    // finish any in-flight exchange and exit.
+                    if let Some(join) = oauth_callback_join {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            join,
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => {
                     // Bind failure is fatal — the daemon can't do

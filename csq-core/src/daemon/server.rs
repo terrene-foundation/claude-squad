@@ -58,6 +58,7 @@ use super::cache::TtlCache;
 use super::refresher::RefreshStatus;
 use crate::accounts::{discovery, AccountInfo};
 use crate::error::DaemonError;
+use crate::oauth::{start_login, LoginRequest, OAuthStateStore, DEFAULT_REDIRECT_PORT};
 use crate::types::AccountNum;
 use axum::{
     extract::{DefaultBodyLimit, Path as AxumPath, State},
@@ -73,9 +74,9 @@ use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 
-/// Shared router state — cache + base_dir paths. Cloned cheaply
-/// (both fields are `Arc`/`PathBuf` inside) for each request via
-/// axum's `State` extractor.
+/// Shared router state — cache + base_dir paths + OAuth state
+/// store. Cloned cheaply (every field is an `Arc` / `PathBuf`
+/// inside) for each request via axum's `State` extractor.
 #[derive(Clone)]
 pub struct RouterState {
     /// Refresh-status cache owned by the daemon lifecycle. The
@@ -83,6 +84,17 @@ pub struct RouterState {
     pub cache: Arc<TtlCache<u16, RefreshStatus>>,
     /// csq base directory, passed through for account discovery.
     pub base_dir: Arc<PathBuf>,
+    /// OAuth state store, shared with the callback listener
+    /// (`daemon::oauth_callback`). `None` when the callback
+    /// listener failed to bind its TCP port at startup — in that
+    /// case `/api/login/{N}` returns 503.
+    pub oauth_store: Option<Arc<OAuthStateStore>>,
+    /// Port the OAuth callback TCP listener is bound to. Embedded
+    /// in the authorize URL as part of the `redirect_uri` query
+    /// parameter — must be byte-identical to what the callback
+    /// listener binds, otherwise Anthropic rejects the exchange.
+    /// Zero when `oauth_store` is `None`.
+    pub oauth_port: u16,
 }
 
 /// Maximum request body size accepted by the daemon HTTP router.
@@ -108,6 +120,7 @@ pub struct HealthResponse {
 /// - `GET /api/accounts` — discovered accounts (M8.5)
 /// - `GET /api/refresh-status` — all refresh statuses from the cache (M8.5)
 /// - `GET /api/refresh-status/:id` — one account's refresh status (M8.5)
+/// - `GET /api/login/:id` — initiate an OAuth login flow (M8.7b)
 ///
 /// The [`DefaultBodyLimit`] layer is installed here so every future
 /// route inherits the 1 MiB cap without having to remember. State
@@ -119,6 +132,7 @@ pub fn router(state: RouterState) -> Router {
         .route("/api/accounts", get(accounts_handler))
         .route("/api/refresh-status", get(refresh_status_all_handler))
         .route("/api/refresh-status/{id}", get(refresh_status_one_handler))
+        .route("/api/login/{id}", get(login_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
 }
@@ -208,6 +222,67 @@ async fn refresh_status_one_handler(
             format!("no cached refresh status for account {id}"),
         )),
     }
+}
+
+/// GET /api/login/:id — initiates an OAuth PKCE login for the
+/// given account slot.
+///
+/// Returns a JSON [`LoginRequest`] containing the Anthropic
+/// authorize URL the caller should open in a browser. The state
+/// store entry is created synchronously; the browser redirect
+/// back to the callback listener will consume it.
+///
+/// # Errors
+///
+/// - **400 Bad Request** — account id is outside 1..=999.
+/// - **503 Service Unavailable** — the daemon failed to bind the
+///   OAuth callback TCP listener at startup (usually because the
+///   port 8420 is in use). The rest of the daemon still functions;
+///   the user needs to free the port and restart the daemon to
+///   log in new accounts.
+/// - **500 Internal Server Error** — unexpected failure in
+///   `start_login` (impossible on supported platforms — it only
+///   fails if the OS CSPRNG is unavailable).
+async fn login_handler(
+    State(state): State<RouterState>,
+    AxumPath(id): AxumPath<u16>,
+) -> Result<Json<LoginRequest>, (StatusCode, String)> {
+    let account = AccountNum::try_from(id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid account id: {e}"),
+        )
+    })?;
+
+    let Some(store) = state.oauth_store.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "oauth callback listener is not available; \
+             check that port 8420 is free and restart the daemon"
+                .to_string(),
+        ));
+    };
+
+    // `oauth_port` defaults to DEFAULT_REDIRECT_PORT when the
+    // listener was not started with a custom port. Zero means
+    // "no listener" and we should have already returned 503 above,
+    // so this is a defensive fallback.
+    let port = if state.oauth_port == 0 {
+        DEFAULT_REDIRECT_PORT
+    } else {
+        state.oauth_port
+    };
+
+    start_login(store, account, port).map(Json).map_err(|e| {
+        // start_login is effectively infallible for valid
+        // AccountNum on supported platforms; if it ever errors we
+        // map to 500 without echoing internal details.
+        tracing::warn!(error = %e, "start_login failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "oauth login initiation failed".to_string(),
+        )
+    })
 }
 
 /// Response body for `GET /api/accounts`.
@@ -540,11 +615,27 @@ mod tests {
     use tempfile::TempDir;
 
     /// Builds a minimal RouterState for tests. Cache starts empty;
-    /// base_dir points at the provided temp directory.
+    /// base_dir points at the provided temp directory. The OAuth
+    /// store is present so the `/api/login/{id}` tests exercise
+    /// the success path; individual tests that want to exercise
+    /// the 503 path pass `oauth_store: None` via `test_state_no_oauth`.
     fn test_state(base: &Path) -> RouterState {
         RouterState {
             cache: Arc::new(TtlCache::with_default_age()),
             base_dir: Arc::new(base.to_path_buf()),
+            oauth_store: Some(Arc::new(OAuthStateStore::new())),
+            oauth_port: DEFAULT_REDIRECT_PORT,
+        }
+    }
+
+    /// Builds a RouterState with `oauth_store: None` so the
+    /// `/api/login/{id}` handler returns 503.
+    fn test_state_no_oauth(base: &Path) -> RouterState {
+        RouterState {
+            cache: Arc::new(TtlCache::with_default_age()),
+            base_dir: Arc::new(base.to_path_buf()),
+            oauth_store: None,
+            oauth_port: 0,
         }
     }
 
@@ -888,6 +979,60 @@ mod tests {
         assert!(body.contains(r#""account":1"#), "body: {body}");
         // Account 2 is not in the cache, so it must not appear.
         assert!(!body.contains(r#""account":2"#), "body: {body}");
+
+        handle.shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), join).await;
+    }
+
+    #[tokio::test]
+    async fn login_route_returns_authorize_url() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("csq-test.sock");
+        let state = test_state(dir.path());
+        // Remember the store so we can verify the pending entry.
+        let store = Arc::clone(state.oauth_store.as_ref().unwrap());
+        let (handle, join) = serve(&sock, state).await.unwrap();
+
+        let (status, body) = http_get(&sock, "/api/login/3").await;
+        assert!(status.contains("200"), "status: {status}");
+        assert!(
+            body.contains(r#""auth_url":"https://platform.claude.com"#),
+            "body: {body}"
+        );
+        assert!(body.contains(r#""account":3"#), "body: {body}");
+        assert!(body.contains(r#""state":""#));
+        assert_eq!(store.len(), 1, "state store should have one pending entry");
+
+        handle.shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), join).await;
+    }
+
+    #[tokio::test]
+    async fn login_route_returns_503_when_oauth_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("csq-test.sock");
+        let state = test_state_no_oauth(dir.path());
+        let (handle, join) = serve(&sock, state).await.unwrap();
+
+        let (status, body) = http_get(&sock, "/api/login/1").await;
+        assert!(status.contains("503"), "status: {status}");
+        assert!(body.contains("oauth callback listener is not available"));
+
+        handle.shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), join).await;
+    }
+
+    #[tokio::test]
+    async fn login_route_rejects_out_of_range_id() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("csq-test.sock");
+        let state = test_state(dir.path());
+        let (handle, join) = serve(&sock, state).await.unwrap();
+
+        // 0 is out of range (AccountNum requires >=1)
+        let (status, body) = http_get(&sock, "/api/login/0").await;
+        assert!(status.contains("400"), "status: {status}");
+        assert!(body.contains("invalid account id"));
 
         handle.shutdown();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), join).await;

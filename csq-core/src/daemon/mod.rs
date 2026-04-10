@@ -22,6 +22,8 @@
 pub mod cache;
 pub mod detect;
 pub mod lifecycle;
+#[cfg(unix)]
+pub mod oauth_callback;
 pub mod paths;
 pub mod pid;
 pub mod refresher;
@@ -36,5 +38,7 @@ pub use paths::{pid_file_path, socket_path};
 pub use pid::PidFile;
 pub use refresher::{spawn as spawn_refresher, HttpPostFn, RefreshStatus, RefresherHandle};
 
+#[cfg(unix)]
+pub use oauth_callback::{serve as serve_oauth_callback, CallbackHandle, CallbackState};
 #[cfg(unix)]
 pub use server::{router, serve, HealthResponse, ServerHandle};
