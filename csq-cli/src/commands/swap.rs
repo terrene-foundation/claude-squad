@@ -1,14 +1,12 @@
 //! `csq swap N` — swap the active account in the current config directory.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use csq_core::rotation;
 use csq_core::types::AccountNum;
 use std::path::Path;
 
 pub fn handle(base_dir: &Path, target: AccountNum) -> Result<()> {
-    let config_dir = super::current_config_dir().ok_or_else(|| {
-        anyhow!("CLAUDE_CONFIG_DIR not set — swap must run inside a csq-managed session")
-    })?;
+    let config_dir = super::validated_config_dir(base_dir)?;
 
     let result = rotation::swap_to(base_dir, &config_dir, target)?;
 

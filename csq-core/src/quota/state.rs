@@ -58,7 +58,7 @@ pub fn save_state(base_dir: &Path, quota_file: &QuotaFile) -> Result<(), ConfigE
         std::fs::create_dir_all(parent).ok();
     }
 
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| ConfigError::InvalidJson {
         path: tmp.clone(),
         reason: format!("write: {e}"),
@@ -92,7 +92,7 @@ pub fn read_cursor(config_dir: &Path) -> Option<String> {
 /// Writes the current payload hash to the config dir's cursor file.
 pub fn write_cursor(config_dir: &Path, hash: &str) -> Result<(), ConfigError> {
     let path = cursor_path(config_dir);
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, hash.as_bytes()).map_err(|e| ConfigError::InvalidJson {
         path: tmp.clone(),
         reason: format!("write cursor: {e}"),

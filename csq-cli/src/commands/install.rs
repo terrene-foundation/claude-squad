@@ -1,6 +1,6 @@
 //! `csq install` — set up the `~/.claude/accounts` directory and patch settings.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 
 pub fn handle() -> Result<()> {
@@ -52,24 +52,49 @@ pub fn handle() -> Result<()> {
 
 fn patch_settings_json(claude_home: &Path) -> Result<()> {
     let path = claude_home.join("settings.json");
-
     std::fs::create_dir_all(claude_home)?;
 
+    // Read existing settings.
+    // On parse failure, DO NOT silently replace — refuse to run and
+    // ask the user to repair the file manually. This prevents data loss
+    // of user's MCP servers, hooks, and custom permissions.
     let mut value: serde_json::Value = match std::fs::read_to_string(&path) {
-        Ok(content) if !content.trim().is_empty() => serde_json::from_str(&content)
-            .unwrap_or_else(|_| serde_json::json!({})),
+        Ok(content) if !content.trim().is_empty() => {
+            serde_json::from_str(&content).map_err(|e| {
+                anyhow!(
+                    "failed to parse existing {} ({e}).\n\
+                     Refusing to overwrite to prevent data loss.\n\
+                     Fix the JSON manually and re-run `csq install`.",
+                    path.display()
+                )
+            })?
+        }
         _ => serde_json::json!({}),
     };
 
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "statusLineCommand".to_string(),
-            serde_json::json!("csq statusline"),
-        );
-    }
+    // Ensure top-level is an object.
+    let obj = value.as_object_mut().ok_or_else(|| {
+        anyhow!("{} is not a JSON object", path.display())
+    })?;
 
+    // Insert the statusLine using CC's expected NESTED schema:
+    //   { "statusLine": { "type": "command", "command": "csq statusline" } }
+    // The flat `statusLineCommand` key would never be read by CC.
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": "csq statusline"
+        }),
+    );
+
+    // Atomic write via temp file + rename
     let json = serde_json::to_string_pretty(&value)?;
-    std::fs::write(&path, json)?;
+    let tmp = csq_core::platform::fs::unique_tmp_path(&path);
+    std::fs::write(&tmp, json.as_bytes())
+        .with_context(|| format!("writing temp file {}", tmp.display()))?;
+    csq_core::platform::fs::atomic_replace(&tmp, &path)
+        .map_err(|e| anyhow!("atomic replace: {e}"))?;
     Ok(())
 }
 

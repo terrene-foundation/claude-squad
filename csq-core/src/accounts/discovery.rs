@@ -160,7 +160,7 @@ pub fn save_manual_account(base_dir: &Path, info: AccountInfo) -> Result<(), cra
         }
     })?;
 
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, json.as_bytes()).map_err(|e| crate::error::ConfigError::InvalidJson {
         path: tmp.clone(),
         reason: format!("write: {e}"),

@@ -1,7 +1,21 @@
 //! Secure file operations: permissions and atomic replacement.
 
 use crate::error::PlatformError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-local counter to disambiguate temp file names within the same process
+/// across threads. Combined with PID, this prevents the intra-process collision
+/// that would occur if two threads in the same process wrote to the same path
+/// simultaneously.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generates a unique temporary file path next to `target`, using PID + a
+/// per-process atomic counter. Returns `target.with_extension("tmp.{pid}.{counter}")`.
+pub fn unique_tmp_path(target: &Path) -> PathBuf {
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_extension(format!("tmp.{}.{}", std::process::id(), counter))
+}
 
 /// Sets file permissions to owner-only read/write (0o600) on Unix.
 /// No-op on Windows (ACL defaults handle this).

@@ -77,9 +77,8 @@ enum Command {
 
     /// Model catalog operations
     Models {
-        /// Provider to filter by, or "all"
-        #[arg(default_value = "all")]
-        provider: String,
+        #[command(subcommand)]
+        action: Option<ModelsCmd>,
     },
 
     /// Install csq into ~/.claude (creates dirs, patches settings.json)
@@ -102,6 +101,23 @@ enum SetkeyCmd {
     Claude {
         #[arg(long)]
         key: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModelsCmd {
+    /// List all models, or filter by provider
+    List {
+        /// Provider ID or "all"
+        #[arg(default_value = "all")]
+        provider: String,
+    },
+    /// Switch the active model for a provider
+    Switch {
+        /// Provider ID (claude, mm, zai, ollama)
+        provider: String,
+        /// Model ID or alias
+        model: String,
     },
 }
 
@@ -158,7 +174,17 @@ fn main() -> Result<()> {
         }
         Command::Listkeys => commands::listkeys::handle(&base_dir),
         Command::Rmkey { provider } => commands::rmkey::handle(&base_dir, &provider),
-        Command::Models { provider } => commands::models::handle(&base_dir, &provider),
+        Command::Models { action } => {
+            let action = action.unwrap_or(ModelsCmd::List {
+                provider: "all".to_string(),
+            });
+            match action {
+                ModelsCmd::List { provider } => commands::models::handle_list(&base_dir, &provider),
+                ModelsCmd::Switch { provider, model } => {
+                    commands::models::handle_switch(&base_dir, &provider, &model)
+                }
+            }
+        }
         Command::Install => commands::install::handle(),
     }
 }

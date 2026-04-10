@@ -8,10 +8,13 @@ use csq_core::providers;
 use std::io::Read;
 use std::path::Path;
 
+/// Maximum acceptable API key length in bytes. Real keys are <200 chars;
+/// 4096 is generous and prevents stdin OOM attacks.
+const MAX_KEY_LEN: u64 = 4096;
+
 pub fn handle(base_dir: &Path, provider_id: &str, key_arg: Option<&str>) -> Result<()> {
-    if providers::get_provider(provider_id).is_none() {
-        return Err(anyhow!("unknown provider: {provider_id}"));
-    }
+    let provider = providers::get_provider(provider_id)
+        .ok_or_else(|| anyhow!("unknown provider: {provider_id}"))?;
 
     let key = match key_arg {
         Some(k) => k.trim().to_string(),
@@ -34,12 +37,59 @@ pub fn handle(base_dir: &Path, provider_id: &str, key_arg: Option<&str>) -> Resu
         provider_id,
         settings.key_fingerprint()
     );
+
+    // Best-effort validation probe — report status but never fail the save
+    if provider.validation_endpoint.is_some() {
+        eprintln!("Validating key...");
+        match validate_key(provider, &key) {
+            providers::validate::ValidationResult::Valid => {
+                eprintln!("  ✓ Valid");
+            }
+            providers::validate::ValidationResult::Invalid => {
+                eprintln!("  ✗ Key rejected by provider (401/403)");
+            }
+            providers::validate::ValidationResult::Unreachable(msg) => {
+                eprintln!("  ⚠ Could not reach provider: {msg}");
+            }
+            providers::validate::ValidationResult::Unexpected { status, .. } => {
+                eprintln!("  ⚠ Unexpected status {status} from provider");
+            }
+        }
+    }
+
     Ok(())
 }
 
+/// Sends a validation probe using the standard library (no reqwest).
+/// Uses a minimal TCP + TLS handshake via `ureq`-like logic — for now
+/// this is a placeholder that returns `Unreachable` until the HTTP
+/// client is wired in M8. The probe infrastructure exists and is tested;
+/// only the transport is deferred.
+fn validate_key(
+    _provider: &providers::Provider,
+    _key: &str,
+) -> providers::validate::ValidationResult {
+    // TODO (M8): implement via ureq or reqwest. Until then, skip validation
+    // silently so setkey still works for local settings storage.
+    providers::validate::ValidationResult::Unreachable(
+        "HTTP validation will be enabled in M8".into(),
+    )
+}
+
+/// Reads an API key from stdin with a hard size limit.
+///
+/// Caps at `MAX_KEY_LEN` bytes to prevent OOM on accidental `cat huge.bin | csq setkey`.
 fn read_key_from_stdin() -> Result<String> {
-    println!("Enter API key (paste, then Enter):");
+    eprintln!("Enter API key (paste, then Ctrl-D):");
     let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
+    std::io::stdin()
+        .take(MAX_KEY_LEN)
+        .read_to_string(&mut buf)?;
+    if buf.len() as u64 >= MAX_KEY_LEN {
+        return Err(anyhow!(
+            "key input too large (limit {} bytes)",
+            MAX_KEY_LEN
+        ));
+    }
     Ok(buf.trim().to_string())
 }

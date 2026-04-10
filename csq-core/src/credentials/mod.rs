@@ -14,10 +14,14 @@ pub use keychain::service_name;
 use crate::types::{AccessToken, RefreshToken};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 /// Top-level credential file. CC owns this schema — we must preserve
 /// every field, including ones we don't recognize.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Debug is customized to mask the `extra` HashMap — if CC ever adds a
+/// new credential field, the forward-compat flatten would otherwise leak it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialFile {
     #[serde(rename = "claudeAiOauth")]
     pub claude_ai_oauth: OAuthPayload,
@@ -27,8 +31,20 @@ pub struct CredentialFile {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+impl fmt::Debug for CredentialFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialFile")
+            .field("claude_ai_oauth", &self.claude_ai_oauth)
+            .field("extra", &format!("<{} unknown fields>", self.extra.len()))
+            .finish()
+    }
+}
+
 /// OAuth token payload within the credential file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Debug is customized to mask the `extra` HashMap for the same reason
+/// as CredentialFile. Token fields are already masked by their types.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthPayload {
     /// Bearer access token. Prefix: `sk-ant-oat01-`.
     #[serde(rename = "accessToken")]
@@ -59,6 +75,20 @@ pub struct OAuthPayload {
     /// Forward-compat: preserve unknown fields from CC updates.
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+impl fmt::Debug for OAuthPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthPayload")
+            .field("access_token", &self.access_token)
+            .field("refresh_token", &self.refresh_token)
+            .field("expires_at", &self.expires_at)
+            .field("scopes", &self.scopes)
+            .field("subscription_type", &self.subscription_type)
+            .field("rate_limit_tier", &self.rate_limit_tier)
+            .field("extra", &format!("<{} unknown fields>", self.extra.len()))
+            .finish()
+    }
 }
 
 impl OAuthPayload {
