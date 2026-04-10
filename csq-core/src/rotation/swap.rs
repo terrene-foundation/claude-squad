@@ -4,10 +4,31 @@
 //! target config dir's `.credentials.json`, along with `.csq-account`
 //! and `.current-account` markers. Never calls the refresh endpoint —
 //! uses cached credentials only.
+//!
+//! # Locking
+//!
+//! The canonical read + live write runs under the per-account
+//! `credentials/N.refresh-lock` — the same lock that
+//! `broker::check::broker_check` acquires before refreshing. This
+//! prevents **C5 (swap_to lock race)**: without the lock, a swap
+//! could read a stale canonical file that the refresher is about to
+//! overwrite, resulting in the live `.credentials.json` containing
+//! a token that has already been rotated.
+//!
+//! The lock is **blocking** (`lock_file`) rather than try-lock
+//! because swap is user-initiated — the user expects it to succeed,
+//! not skip. If the refresher holds the lock (typically <1s during
+//! a token refresh), swap waits until the refresh completes and
+//! then reads the fresh canonical.
+//!
+//! Markers and keychain writes happen outside the lock — they don't
+//! race with the refresher and holding the lock longer than needed
+//! delays subsequent refresh ticks.
 
 use crate::accounts::markers;
 use crate::credentials::{self, file};
 use crate::error::{CredentialError, CsqError};
+use crate::platform::lock;
 use crate::types::AccountNum;
 use std::path::Path;
 use tracing::{debug, warn};
@@ -25,6 +46,14 @@ pub fn swap_to(
     target: AccountNum,
 ) -> Result<SwapResult, CsqError> {
     let canonical_path = file::canonical_path(base_dir, target);
+
+    // Acquire the per-account refresh lock. This is the same lock
+    // that broker_check takes (via try_lock_file) before refreshing
+    // credentials. Holding it ensures we read a consistent canonical
+    // file — either pre- or post-refresh, never mid-write.
+    let lock_path = canonical_path.with_extension("refresh-lock");
+    let _guard = lock::lock_file(&lock_path)?;
+
     let creds = credentials::load(&canonical_path)?;
 
     let live_path = config_dir.join(".credentials.json");
@@ -43,6 +72,11 @@ pub fn swap_to(
             reason: "verification: access token mismatch after write".into(),
         }));
     }
+
+    // Drop the lock before markers + keychain writes. These do not
+    // race with the refresher and we want to minimize lock duration
+    // so the refresher's next tick isn't delayed.
+    drop(_guard);
 
     // Update markers
     markers::write_csq_account(config_dir, target)?;
@@ -146,4 +180,66 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Regression test for C5 (swap_to lock race).
+    ///
+    /// Simulates the race condition: a "refresher" thread holds the
+    /// per-account refresh-lock while overwriting the canonical
+    /// credential file. `swap_to` must block until the lock is
+    /// released and read the FRESH canonical, not the stale one.
+    #[test]
+    fn swap_waits_for_refresh_lock_c5_regression() {
+        use crate::platform::lock;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config-3");
+        std::fs::create_dir_all(&config).unwrap();
+        let target = AccountNum::try_from(3u16).unwrap();
+
+        // Install initial (stale) credentials.
+        let stale = make_creds("stale-token", "rt-3");
+        credentials::save(&file::canonical_path(dir.path(), target), &stale).unwrap();
+
+        let canonical = file::canonical_path(dir.path(), target);
+        let lock_path = canonical.with_extension("refresh-lock");
+
+        // Barrier: ensures the "refresher" thread holds the lock
+        // before swap_to starts.
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = Arc::clone(&barrier);
+        let lock_path_clone = lock_path.clone();
+        let canonical_clone = canonical.clone();
+
+        let refresher = thread::spawn(move || {
+            // 1. Acquire the lock (simulating broker_check).
+            let _guard = lock::lock_file(&lock_path_clone).unwrap();
+            // 2. Signal swap thread that the lock is held.
+            barrier_clone.wait();
+            // 3. Simulate refresh work (overwrite canonical).
+            let fresh = make_creds("fresh-token", "rt-3-new");
+            credentials::save(&canonical_clone, &fresh).unwrap();
+            // 4. Short delay to ensure swap_to is blocked on the lock.
+            thread::sleep(std::time::Duration::from_millis(50));
+            // 5. Drop guard — releases the lock so swap_to can proceed.
+        });
+
+        // Wait until the "refresher" holds the lock.
+        barrier.wait();
+
+        // swap_to should block on the lock, then read the FRESH
+        // canonical that the refresher wrote.
+        let result = swap_to(dir.path(), &config, target).unwrap();
+        assert_eq!(result.account, target);
+
+        // The live file must contain the FRESH token, not the stale one.
+        let live = credentials::load(&config.join(".credentials.json")).unwrap();
+        assert_eq!(
+            live.claude_ai_oauth.access_token.expose_secret(),
+            "fresh-token",
+            "C5 regression: swap_to must read post-refresh canonical, not stale"
+        );
+
+        refresher.join().unwrap();
+    }
 }
