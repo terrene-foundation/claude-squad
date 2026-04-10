@@ -83,6 +83,22 @@ enum Command {
 
     /// Install csq into ~/.claude (creates dirs, patches settings.json)
     Install,
+
+    /// Background daemon lifecycle (start/stop/status)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonCmd {
+    /// Start the daemon in the foreground (blocks until SIGTERM or Ctrl-C)
+    Start,
+    /// Stop the running daemon via SIGTERM
+    Stop,
+    /// Show the daemon's status (running / stale / not running)
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -186,5 +202,10 @@ fn main() -> Result<()> {
             }
         }
         Command::Install => commands::install::handle(),
+        Command::Daemon { action } => match action {
+            DaemonCmd::Start => commands::daemon::handle_start(&base_dir),
+            DaemonCmd::Stop => commands::daemon::handle_stop(&base_dir),
+            DaemonCmd::Status => commands::daemon::handle_status(&base_dir),
+        },
     }
 }

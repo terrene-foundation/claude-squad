@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod broker;
 pub mod credentials;
+pub mod daemon;
 pub mod error;
 pub mod http;
 pub mod platform;

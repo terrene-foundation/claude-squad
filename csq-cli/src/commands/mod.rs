@@ -1,5 +1,6 @@
 //! Subcommand handlers for the csq CLI.
 
+pub mod daemon;
 pub mod install;
 pub mod listkeys;
 pub mod login;
