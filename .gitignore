@@ -17,6 +17,10 @@ config-*/
 # Rust build artifacts
 target/
 
+# csq-desktop frontend build artifacts
+csq-desktop/node_modules/
+csq-desktop/dist/
+
 # Local-only research and notes folders
 notes/
 research/
