@@ -1,6 +1,7 @@
 use csq_core::accounts::discovery;
 use csq_core::accounts::AccountSource;
 use csq_core::broker::fanout;
+use csq_core::credentials::{self, file as cred_file};
 use csq_core::quota::state as quota_state;
 use csq_core::quota::QuotaFile;
 use csq_core::rotation;
@@ -23,6 +24,17 @@ pub struct AccountView {
     pub five_hour_pct: f64,
     pub seven_day_pct: f64,
     pub updated_at: f64,
+    /// "healthy" | "expiring" | "expired" | "missing"
+    pub token_status: String,
+    /// Seconds until token expires. Negative = expired N seconds ago.
+    pub expires_in_secs: Option<i64>,
+}
+
+/// Daemon status, safe to send over IPC.
+#[derive(Serialize)]
+pub struct DaemonStatusView {
+    pub running: bool,
+    pub pid: Option<u32>,
 }
 
 /// Returns all configured accounts with current quota data.
@@ -41,10 +53,39 @@ pub fn get_accounts(base_dir: String) -> Result<Vec<AccountView>, String> {
     let accounts = discovery::discover_all(&base);
     let quota: QuotaFile = quota_state::load_state(&base).unwrap_or_else(|_| QuotaFile::empty());
 
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
     let views = accounts
         .into_iter()
         .map(|a| {
             let q = quota.get(a.id);
+
+            // Token health: load credential file and check expiry
+            let (token_status, expires_in_secs) = match AccountNum::try_from(a.id) {
+                Ok(num) => {
+                    let canonical = cred_file::canonical_path(&base, num);
+                    match credentials::load(&canonical) {
+                        Ok(creds) => {
+                            let exp_ms = creds.claude_ai_oauth.expires_at;
+                            let secs = (exp_ms as i64 - now_ms as i64) / 1000;
+                            let status = if secs <= 0 {
+                                "expired"
+                            } else if creds.claude_ai_oauth.is_expired_within(7200) {
+                                "expiring"
+                            } else {
+                                "healthy"
+                            };
+                            (status.to_string(), Some(secs))
+                        }
+                        Err(_) => ("missing".to_string(), None),
+                    }
+                }
+                Err(_) => ("missing".to_string(), None),
+            };
+
             AccountView {
                 id: a.id,
                 label: a.label,
@@ -57,6 +98,8 @@ pub fn get_accounts(base_dir: String) -> Result<Vec<AccountView>, String> {
                 five_hour_pct: q.map(|q| q.five_hour_pct()).unwrap_or(0.0),
                 seven_day_pct: q.map(|q| q.seven_day_pct()).unwrap_or(0.0),
                 updated_at: q.map(|q| q.updated_at).unwrap_or(0.0),
+                token_status,
+                expires_in_secs,
             }
         })
         .collect();
@@ -101,4 +144,32 @@ pub fn set_rotation_enabled(base_dir: String, enabled: bool) -> Result<(), Strin
     let mut config = rotation_config::load(&base).map_err(|e| e.to_string())?;
     config.enabled = enabled;
     rotation_config::save(&base, &config).map_err(|e| e.to_string())
+}
+
+/// Returns whether the csq daemon is running.
+#[tauri::command]
+pub fn get_daemon_status(base_dir: String) -> Result<DaemonStatusView, String> {
+    let base = PathBuf::from(&base_dir);
+    let pid_path = csq_core::daemon::pid_file_path(&base);
+    let status = csq_core::daemon::status_of(&pid_path);
+    Ok(match status {
+        csq_core::daemon::DaemonStatus::Running { pid } => {
+            DaemonStatusView { running: true, pid: Some(pid) }
+        }
+        _ => DaemonStatusView { running: false, pid: None },
+    })
+}
+
+/// Returns a login instruction for the given account.
+///
+/// Full OAuth from the desktop app requires the daemon's callback
+/// listener. For alpha, we direct users to the CLI.
+#[tauri::command]
+pub fn start_login(account: u16) -> Result<String, String> {
+    if !(1..=999).contains(&account) {
+        return Err(format!("account must be 1-999, got {account}"));
+    }
+    Ok(format!(
+        "Run `csq login {account}` in your terminal to authenticate this account."
+    ))
 }
