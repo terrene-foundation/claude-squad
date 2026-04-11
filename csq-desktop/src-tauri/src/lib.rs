@@ -8,9 +8,67 @@ use csq_core::rotation;
 use csq_core::types::AccountNum;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager};
+
+// ── Tray icon assets ──────────────────────────────────────
+//
+// Compile-time embed of the three tray icon variants generated
+// from the Terrene Foundation TF monogram favicon. Retina (@2x)
+// variants are embedded alongside the 1x variants; Tauri's
+// `set_icon` picks one or the other based on the current display.
+//
+// Normal is a white/near-white glyph with transparency — loaded as
+// a template image on macOS so the OS auto-inverts for dark vs
+// light menu bars. Warn and error are full-color (amber / red) and
+// are NOT template images, because the whole point is that the
+// color communicates the state.
+const TRAY_NORMAL_PNG: &[u8] = include_bytes!("../icons/tray-normal.png");
+const TRAY_NORMAL_PNG_2X: &[u8] = include_bytes!("../icons/tray-normal@2x.png");
+const TRAY_WARN_PNG: &[u8] = include_bytes!("../icons/tray-warn.png");
+const TRAY_ERROR_PNG: &[u8] = include_bytes!("../icons/tray-error.png");
+
+/// Which tray icon to show for a given `TrayHealth` rollup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayIconKind {
+    /// White/near-white glyph; macOS template image.
+    Normal,
+    /// Amber glyph; full color (not a template image).
+    Warn,
+    /// Red glyph; full color (not a template image).
+    Error,
+}
+
+impl TrayIconKind {
+    /// Returns the packed PNG bytes for this variant. We always
+    /// ship the 1x bytes to Tauri — the compiled-in `@2x` variant is
+    /// reserved for the upcoming macOS NSImage double-representation
+    /// wiring (currently embedded but unused to keep the surface
+    /// minimal; see the TODO in `apply_tray_icon`).
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            TrayIconKind::Normal => TRAY_NORMAL_PNG,
+            TrayIconKind::Warn => TRAY_WARN_PNG,
+            TrayIconKind::Error => TRAY_ERROR_PNG,
+        }
+    }
+
+    /// macOS template mode — the OS auto-inverts template images
+    /// for dark/light menu bars. Only the normal (near-white) glyph
+    /// benefits; warn/error want their colors preserved.
+    fn is_template(self) -> bool {
+        matches!(self, TrayIconKind::Normal)
+    }
+}
+
+// Suppress dead-code on the retina variant until it's wired into
+// a macOS NSImage double-rep (open question: whether Tauri's
+// TrayIcon will accept a pre-scaled 2x bitmap or whether we'd need
+// to drop through to the raw `NSImage` via `objc2`).
+#[allow(dead_code)]
+const _: &[u8] = TRAY_NORMAL_PNG_2X;
 
 /// State shared with Tauri commands.
 ///
@@ -230,6 +288,21 @@ struct TrayStatus {
 }
 
 impl TrayStatus {
+    /// Which icon variant to show for this rollup.
+    ///
+    /// Empty and Healthy → normal (template image, adapts to
+    /// menu-bar theme). Expiring → warn (amber). OutOfQuota →
+    /// error (red). The mapping mirrors `TrayHealth`'s precedence
+    /// rules: out-of-quota blocks work today and wins over
+    /// expiring, which resolves automatically on refresh.
+    fn icon_kind(&self) -> TrayIconKind {
+        match self.health {
+            TrayHealth::Empty | TrayHealth::Healthy => TrayIconKind::Normal,
+            TrayHealth::Expiring { .. } => TrayIconKind::Warn,
+            TrayHealth::OutOfQuota { .. } => TrayIconKind::Error,
+        }
+    }
+
     /// Human-readable tooltip string shown when the user hovers the
     /// tray icon. Tooltip format intentionally starts with
     /// "Claude Squad" so the app is identifiable before the status
@@ -472,15 +545,46 @@ fn handle_tray_event(app: &AppHandle, id: &str) {
     }
 }
 
-/// Rebuilds the tray menu and refreshes the tooltip status.
+/// Applies an icon variant + its template-image mode to the tray.
+///
+/// Separated out from `refresh_tray_menu` so failures to load or
+/// set either of the two independent properties (icon bytes,
+/// template flag) produce a single cohesive log line with the
+/// intended `TrayIconKind` for forensic context.
+///
+/// On Windows and Linux the template-image flag is a no-op at the
+/// platform layer — Tauri's API accepts the call everywhere but
+/// only macOS acts on it.
+fn apply_tray_icon(tray: &TrayIcon, kind: TrayIconKind) {
+    match Image::from_bytes(kind.bytes()) {
+        Ok(image) => {
+            if let Err(e) = tray.set_icon(Some(image)) {
+                log::warn!("failed to set tray icon for {kind:?}: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            log::warn!("failed to decode tray icon png for {kind:?}: {e}");
+            return;
+        }
+    }
+    if let Err(e) = tray.set_icon_as_template(kind.is_template()) {
+        log::warn!("failed to set tray template mode for {kind:?}: {e}");
+    }
+}
+
+/// Rebuilds the tray menu and refreshes the tooltip + icon status.
 ///
 /// Called on a 30s interval so the tray reflects account additions,
 /// deletions, active-session changes from the CLI, and token/quota
 /// status transitions.
 ///
-/// The tooltip is derived from `compute_tray_status` and tells the
-/// user whether any account is currently out-of-quota or expiring
-/// without requiring them to open the dashboard window.
+/// Three things update on every tick:
+/// 1. The menu item list (accounts discovered under `~/.claude/
+///    accounts`).
+/// 2. The tooltip text (aggregate status summary).
+/// 3. The tray icon variant (normal / warn / error, matching
+///    `TrayStatus::icon_kind`).
 fn refresh_tray_menu(app: &AppHandle, tray: &TrayIcon) {
     if let Ok(menu) = build_tray_menu(app) {
         let _ = tray.set_menu(Some(menu));
@@ -493,6 +597,7 @@ fn refresh_tray_menu(app: &AppHandle, tray: &TrayIcon) {
         if let Err(e) = tray.set_tooltip(Some(&status.tooltip())) {
             log::warn!("failed to set tray tooltip: {e}");
         }
+        apply_tray_icon(tray, status.icon_kind());
     }
 }
 
@@ -511,6 +616,8 @@ pub fn run() {
             commands::submit_oauth_code,
             commands::cancel_login,
             commands::set_provider_key,
+            commands::list_sessions,
+            commands::swap_session,
         ])
         .setup(|app| {
             // ── Logging ────────────────────────────────────────
@@ -572,18 +679,27 @@ pub fn run() {
 
             // ── System tray ──────────────────────────────────
             //
-            // Initial tooltip is computed from the account set so
-            // the first hover on a just-launched app already shows
-            // live status (e.g. "7 accounts healthy"). Without this
-            // the tooltip says "Claude Squad" until the 30s refresh
-            // ticker first fires.
-            let initial_tooltip = base_dir()
-                .map(|b| compute_tray_status(&b).tooltip())
-                .unwrap_or_else(|| "Claude Squad".to_string());
+            // Initial tooltip + icon are both computed from the
+            // account set so the first hover on a just-launched
+            // app already shows live status (e.g. "7 accounts
+            // healthy") and the menu bar already reflects whether
+            // anything needs attention. Without this the tooltip
+            // would say "Claude Squad" and the icon would stay
+            // neutral until the 30s refresh ticker first fires.
+            let (initial_tooltip, initial_icon_kind) = match base_dir() {
+                Some(b) => {
+                    let status = compute_tray_status(&b);
+                    (status.tooltip(), status.icon_kind())
+                }
+                None => ("Claude Squad".to_string(), TrayIconKind::Normal),
+            };
+            let initial_image = Image::from_bytes(initial_icon_kind.bytes())?;
             let menu = build_tray_menu(app.handle())?;
             let tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip(&initial_tooltip)
+                .icon(initial_image)
+                .icon_as_template(initial_icon_kind.is_template())
                 .on_menu_event(move |app, event| {
                     handle_tray_event(app, event.id().as_ref());
                 })
@@ -910,5 +1026,67 @@ mod tests {
 
         let status = compute_tray_status(base.path());
         assert_eq!(status.health, TrayHealth::Healthy);
+    }
+
+    // ── icon_kind ───────────────────────────────────────────
+
+    #[test]
+    fn icon_kind_normal_for_empty_and_healthy() {
+        let empty = TrayStatus {
+            total: 0,
+            health: TrayHealth::Empty,
+        };
+        assert_eq!(empty.icon_kind(), TrayIconKind::Normal);
+
+        let healthy = TrayStatus {
+            total: 3,
+            health: TrayHealth::Healthy,
+        };
+        assert_eq!(healthy.icon_kind(), TrayIconKind::Normal);
+    }
+
+    #[test]
+    fn icon_kind_warn_for_expiring() {
+        let status = TrayStatus {
+            total: 3,
+            health: TrayHealth::Expiring { count: 2 },
+        };
+        assert_eq!(status.icon_kind(), TrayIconKind::Warn);
+    }
+
+    #[test]
+    fn icon_kind_error_for_out_of_quota() {
+        let status = TrayStatus {
+            total: 3,
+            health: TrayHealth::OutOfQuota { count: 1 },
+        };
+        assert_eq!(status.icon_kind(), TrayIconKind::Error);
+    }
+
+    #[test]
+    fn icon_kind_template_only_for_normal() {
+        assert!(TrayIconKind::Normal.is_template());
+        assert!(!TrayIconKind::Warn.is_template());
+        assert!(!TrayIconKind::Error.is_template());
+    }
+
+    #[test]
+    fn icon_bytes_are_non_empty_and_distinct() {
+        let normal = TrayIconKind::Normal.bytes();
+        let warn = TrayIconKind::Warn.bytes();
+        let error = TrayIconKind::Error.bytes();
+        assert!(normal.len() > 16);
+        assert!(warn.len() > 16);
+        assert!(error.len() > 16);
+        // PNG magic (first 8 bytes)
+        const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+        assert_eq!(&normal[..8], PNG_MAGIC);
+        assert_eq!(&warn[..8], PNG_MAGIC);
+        assert_eq!(&error[..8], PNG_MAGIC);
+        // Variants must differ from each other (otherwise the icon
+        // swap is a no-op and the regression would be invisible).
+        assert_ne!(normal, warn);
+        assert_ne!(warn, error);
+        assert_ne!(normal, error);
     }
 }

@@ -22,6 +22,27 @@
   let loading = $state(true);
   let modalOpen = $state(false);
 
+  // ── First-paint instrumentation ──────────────────────────
+  //
+  // Budget: first usable paint <200ms from module import. The
+  // dashboard is the escape hatch when the tray quick-swap picks
+  // the wrong session, so sluggish first paint during a rate-limit
+  // recovery moment is the worst time for it. This instrumentation
+  // logs one line per cold load in dev builds so the 200ms budget
+  // is visible in the console as the app evolves. Stripped in
+  // production — `import.meta.env.DEV` is a Vite-injected compile
+  // constant, not a runtime feature flag.
+  const firstPaintStart =
+    typeof performance !== 'undefined' ? performance.now() : 0;
+  let firstPaintLogged = false;
+  function logFirstPaint(label: string) {
+    if (firstPaintLogged || !import.meta.env.DEV) return;
+    firstPaintLogged = true;
+    const elapsed = performance.now() - firstPaintStart;
+    // eslint-disable-next-line no-console
+    console.info(`[csq] first paint (${label}) in ${elapsed.toFixed(1)}ms`);
+  }
+
   async function getBaseDir(): Promise<string> {
     // Use `join` so the platform's path separator is honored.
     // Tauri 2.10's `homeDir()` returns the home path without a
@@ -41,6 +62,11 @@
       error = String(e);
     } finally {
       loading = false;
+      // The list is about to render in the next microtask — that's
+      // the first moment the user sees either the rows or the
+      // error banner. Log here so the measurement covers the full
+      // IPC round-trip, not just component mount.
+      logFirstPaint(error ? 'error' : 'ready');
     }
   }
 

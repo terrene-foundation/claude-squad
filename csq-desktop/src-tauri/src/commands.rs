@@ -12,6 +12,7 @@ use csq_core::quota::QuotaFile;
 use csq_core::rotation;
 use csq_core::rotation::config as rotation_config;
 use csq_core::rotation::RotationConfig;
+use csq_core::sessions;
 use csq_core::types::AccountNum;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -147,6 +148,144 @@ pub fn set_rotation_enabled(base_dir: String, enabled: bool) -> Result<(), Strin
     let mut config = rotation_config::load(&base).map_err(|e| e.to_string())?;
     config.enabled = enabled;
     rotation_config::save(&base, &config).map_err(|e| e.to_string())
+}
+
+/// Public view of one live CC session, safe to send over IPC.
+///
+/// Includes the current account for the bound config dir plus its
+/// 5-hour usage percentage so the dashboard can render a "terminal
+/// #5 → account #3 at 87%" row without the frontend making a
+/// second IPC call.
+#[derive(Serialize)]
+pub struct SessionView {
+    /// OS process ID.
+    pub pid: u32,
+    /// Working directory at process creation.
+    pub cwd: String,
+    /// Path to the `config-N` dir this session is bound to.
+    pub config_dir: String,
+    /// Account number extracted from the config dir name, or null.
+    pub account_id: Option<u16>,
+    /// Account label for `account_id` at the moment of the query,
+    /// or null if the account is unknown.
+    pub account_label: Option<String>,
+    /// Current 5-hour quota percentage for the bound account.
+    pub five_hour_pct: f64,
+    /// Unix seconds since the process started, or null if the
+    /// platform could not report it.
+    pub started_at: Option<u64>,
+}
+
+/// Returns the list of live Claude Code sessions under the current
+/// user. Each entry is one terminal's `claude` process with the
+/// current account and 5-hour quota for its bound config dir.
+///
+/// Unknown on Windows (returns an empty vector). See
+/// `csq_core::sessions::windows` for the rationale.
+#[tauri::command]
+pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
+    let base = PathBuf::from(&base_dir);
+    if !base.is_dir() {
+        return Err(format!("base directory does not exist: {base_dir}"));
+    }
+
+    let sessions = sessions::list();
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One discovery + quota load reused across rows. Ties each
+    // session row to the *current* active account for its config
+    // dir, which may have rotated since the process launched.
+    let accounts = discovery::discover_all(&base);
+    let quota: QuotaFile = quota_state::load_state(&base).unwrap_or_else(|_| QuotaFile::empty());
+
+    let mut out = Vec::with_capacity(sessions.len());
+    for s in sessions {
+        // The session's `account_id` is derived from the config dir
+        // name (`config-5` → `5`), but the dir's *current* active
+        // account comes from the live state marker — it may have
+        // been rotated by the daemon since the terminal launched.
+        // Prefer the live state for the dashboard display so a row
+        // like "config-5 → account #3" reflects reality.
+        let live_account = AccountNum::try_from(s.account_id.unwrap_or(0))
+            .ok()
+            .map(|n| n.get());
+        let account_info = live_account.and_then(|id| accounts.iter().find(|a| a.id == id));
+        let account_label = account_info.map(|a| a.label.clone());
+        let five_hour_pct = live_account
+            .and_then(|id| quota.get(id).map(|q| q.five_hour_pct()))
+            .unwrap_or(0.0);
+
+        out.push(SessionView {
+            pid: s.pid,
+            cwd: s.cwd.display().to_string(),
+            config_dir: s.config_dir.display().to_string(),
+            account_id: s.account_id,
+            account_label,
+            five_hour_pct,
+            started_at: s.started_at,
+        });
+    }
+
+    // Deterministic ordering by PID so the dashboard list doesn't
+    // shuffle between polls. Ascending PID roughly maps to "order
+    // the terminals were opened" which matches how the user thinks
+    // about their workspace.
+    out.sort_by_key(|s| s.pid);
+    Ok(out)
+}
+
+/// Retargets a **specific** `config-N` dir to a new account,
+/// bypassing the "most recently modified" heuristic that the tray
+/// quick-swap uses.
+///
+/// This is the command the Sessions view calls when the user
+/// clicks the Swap button on a specific terminal row — it knows
+/// exactly which config dir belongs to that terminal from the
+/// `list_sessions` output.
+///
+/// `base_dir` is the csq accounts root (`~/.claude/accounts`).
+/// `config_dir` MUST be a path that lives underneath it (enforced
+/// below to prevent path-traversal). `target` must be 1..=999.
+#[tauri::command]
+pub fn swap_session(base_dir: String, config_dir: String, target: u16) -> Result<String, String> {
+    let base = PathBuf::from(&base_dir);
+    let config = PathBuf::from(&config_dir);
+
+    // Canonicalize both sides and refuse any config dir that isn't
+    // a direct child of `base`. `fs::canonicalize` follows symlinks,
+    // which is the correct behavior here — if the user symlinked
+    // `config-5` to a directory outside `base`, we refuse the swap
+    // instead of letting IPC writes escape the accounts root.
+    let base_canon = std::fs::canonicalize(&base).map_err(|e| format!("invalid base_dir: {e}"))?;
+    let config_canon =
+        std::fs::canonicalize(&config).map_err(|e| format!("invalid config_dir: {e}"))?;
+    if config_canon.parent() != Some(base_canon.as_path()) {
+        return Err(format!(
+            "config_dir must be a direct child of base_dir: {}",
+            config.display()
+        ));
+    }
+    // Second defense: the dir name must match `config-<1..=999>`.
+    let name = config_canon
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "config_dir has no name".to_string())?;
+    let num_str = name
+        .strip_prefix("config-")
+        .ok_or_else(|| format!("config_dir must be config-<N>: {name}"))?;
+    let n: u16 = num_str
+        .parse()
+        .map_err(|_| format!("config_dir suffix is not numeric: {num_str}"))?;
+    if !(1..=999).contains(&n) {
+        return Err(format!("config_dir number out of range: {n}"));
+    }
+
+    let account = AccountNum::try_from(target).map_err(|e| format!("invalid account: {e}"))?;
+    rotation::swap_to(&base_canon, &config_canon, account)
+        .map(|r| format!("Swapped {} to account {}", name, r.account))
+        .map_err(|e| e.to_string())
 }
 
 /// Returns whether the csq daemon is running.

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { homeDir } from '@tauri-apps/api/path';
+  import { homeDir, join } from '@tauri-apps/api/path';
 
   interface DaemonStatusView {
     running: boolean;
@@ -11,8 +11,12 @@
 
   async function fetchDaemonStatus() {
     try {
+      // Use `join` so the platform's path separator is honored.
+      // Tauri 2.10's `homeDir()` returns a path without a trailing
+      // separator, so naive concatenation produces an invalid path
+      // like `/Users/esperie.claude/accounts` (see journal 0021).
       const home = await homeDir();
-      const baseDir = home + '.claude/accounts';
+      const baseDir = await join(home, '.claude', 'accounts');
       const status = await invoke<DaemonStatusView>('get_daemon_status', { baseDir });
       daemonRunning = status.running;
     } catch {
