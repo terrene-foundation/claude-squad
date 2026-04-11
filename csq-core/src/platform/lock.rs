@@ -185,7 +185,7 @@ mod imp {
     /// the calling thread already owns the mutex, so same-thread
     /// contention tests are unreliable.  Cross-thread and cross-
     /// process tests work correctly.
-    fn mutex_name(path: &Path, use_global: bool) -> Vec<u16> {
+    pub(super) fn mutex_name(path: &Path, use_global: bool) -> Vec<u16> {
         let hash_hex = hash_path(path);
         let name = if use_global {
             format!("Global\\csq-lock-{hash_hex}")
