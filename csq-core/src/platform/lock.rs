@@ -195,45 +195,68 @@ mod imp {
         name.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Attempts `CreateMutexW` with the Global namespace first.
+    /// Process-wide cache of the Global-namespace availability.
     ///
-    /// Falls back to the implicit Local namespace if the Global
-    /// open is rejected with `ERROR_ACCESS_DENIED` or
-    /// `ERROR_PRIVILEGE_NOT_HELD`.  Any other error is returned
-    /// as-is so bugs are surfaced rather than silently fallen-back.
+    /// `None`  — not yet probed
+    /// `true`  — Global\ works (elevated account / daemon)
+    /// `false` — Global\ denied; use implicit Local\ namespace
+    ///
+    /// We probe exactly once per process, on the first lock
+    /// acquisition, so every subsequent `lock_file` /
+    /// `try_lock_file` skips the extra CreateMutexW round-trip and
+    /// the fallback warning.
+    static GLOBAL_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    /// Probes whether the current process can create Global\ named
+    /// mutexes. Uses a fixed probe name so repeated probes are
+    /// idempotent and don't pollute the namespace.
+    fn probe_global_availability() -> bool {
+        let probe_name: Vec<u16> = "Global\\csq-probe-0000000000000000"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, probe_name.as_ptr()) };
+        if handle.is_null() {
+            let err = unsafe { GetLastError() };
+            if err == ERROR_ACCESS_DENIED || err == ERROR_PRIVILEGE_NOT_HELD {
+                warn!(
+                    "Global\\ namespace unavailable (error {err}); falling back to session-local \
+                     mutexes for this process. Cross-session serialization is not guaranteed \
+                     for standard user accounts."
+                );
+                return false;
+            }
+            // Unexpected error — assume Global is broken and log.
+            warn!("Global\\ probe failed with unexpected error {err}; using Local namespace");
+            return false;
+        }
+        // Probe succeeded — close it immediately and remember.
+        unsafe { CloseHandle(handle) };
+        true
+    }
+
+    /// Attempts `CreateMutexW`, choosing the namespace based on a
+    /// process-wide cached capability probe.
+    ///
+    /// The first call to `probe_global_availability` does a single
+    /// `CreateMutexW` with a fixed `Global\csq-probe-...` name; all
+    /// subsequent locks skip the probe and pick the right namespace
+    /// directly. This eliminates per-call log spam and the 2×
+    /// syscall overhead on standard-user accounts.
     fn create_mutex_with_fallback(path: &Path) -> Result<*mut std::ffi::c_void, PlatformError> {
-        // Try Global first — gives correct cross-session semantics
-        // on elevated accounts and daemons.
-        let global_name = mutex_name(path, true);
-        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, global_name.as_ptr()) };
+        let use_global = *GLOBAL_AVAILABLE.get_or_init(probe_global_availability);
+        let name = mutex_name(path, use_global);
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if !handle.is_null() {
             return Ok(handle);
         }
-
-        let err = unsafe { GetLastError() };
-        if err == ERROR_ACCESS_DENIED || err == ERROR_PRIVILEGE_NOT_HELD {
-            // Expected on standard user accounts — fall back to
-            // Local\ namespace. This is per-session only: two
-            // Terminal Services sessions for the same user will
-            // not serialize. See red-team H4 for the caveat.
-            warn!(
-                "Global\\ mutex denied (error {err}); falling back to session-local namespace. \
-                 Cross-session serialization is not guaranteed for standard user accounts."
-            );
-            let local_name = mutex_name(path, false);
-            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, local_name.as_ptr()) };
-            if !handle.is_null() {
-                return Ok(handle);
-            }
-            return Err(PlatformError::Win32 {
-                code: unsafe { GetLastError() },
-                message: "CreateMutexW failed in Local namespace after Global fallback".into(),
-            });
-        }
-
         Err(PlatformError::Win32 {
-            code: err,
-            message: "CreateMutexW failed".into(),
+            code: unsafe { GetLastError() },
+            message: if use_global {
+                "CreateMutexW failed in Global namespace".into()
+            } else {
+                "CreateMutexW failed in Local namespace".into()
+            },
         })
     }
 

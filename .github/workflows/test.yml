@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Pinned Rust version. Must match `rust-toolchain.toml` — the toml
+  # is for local developers, this env var is for CI. Bump deliberately
+  # in its own PR and verify `cargo clippy -D warnings` passes first.
+  RUST_VERSION: 1.94.1
   # Bump this to bust all cargo caches after a corruption incident.
   CACHE_VERSION: v1
 
@@ -30,7 +34,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.1
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
@@ -40,8 +44,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-
+          key: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-
 
       - name: Install Linux system deps (Tauri)
         if: runner.os == 'Linux'
@@ -67,7 +71,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.1
+          toolchain: ${{ env.RUST_VERSION }}
           components: clippy
 
       - name: Cache cargo registry + target
@@ -77,8 +81,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-
+          key: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-
 
       - name: Install Linux system deps (Tauri)
         run: |
@@ -103,7 +107,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.1
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt
 
       - name: Check formatting

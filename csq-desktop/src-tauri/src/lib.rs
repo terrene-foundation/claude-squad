@@ -49,30 +49,58 @@ fn sanitize_label(s: &str) -> String {
     }
 }
 
-/// Returns every `config-*` directory under base_dir.
+/// Returns the most recently modified `config-N` directory under
+/// `base_dir`, where `N` is a valid account number (1..=999).
 ///
-/// Unlike `fanout::scan_config_dirs` which filters by the marker
-/// account, this returns ALL live config dirs regardless of which
-/// account they currently hold. Used by the tray quick-swap to
-/// retarget every live session to a single account.
-fn list_all_config_dirs(base: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return dirs;
-    };
+/// Tray quick-swap targets only ONE config dir — retargeting every
+/// live session at once is destructive and silent. By picking the
+/// most-recently-modified dir we approximate "the user's current
+/// session" without needing `CLAUDE_CONFIG_DIR` (which GUI-launched
+/// apps don't inherit).
+///
+/// Rejects:
+/// * Non-directories
+/// * Symlinks (could redirect writes outside base_dir)
+/// * Names not matching `config-<1..=999>`
+fn most_recent_config_dir(base: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(base).ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+        // Reject symlinks via `file_type()` which does NOT follow.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() || !ft.is_dir() {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+
+        let name_os = entry.file_name();
+        let Some(name) = name_os.to_str() else {
             continue;
         };
-        if name.starts_with("config-") {
-            dirs.push(path);
+
+        // Must match `config-<1..=999>` exactly.
+        let Some(num_str) = name.strip_prefix("config-") else {
+            continue;
+        };
+        let Ok(n) = num_str.parse::<u16>() else {
+            continue;
+        };
+        if !(1..=999).contains(&n) {
+            continue;
+        }
+
+        // Take the most recently modified one.
+        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
+        let Some(mtime) = mtime else { continue };
+
+        match best.as_ref() {
+            None => best = Some((mtime, entry.path())),
+            Some((t, _)) if mtime > *t => best = Some((mtime, entry.path())),
+            _ => {}
         }
     }
-    dirs
+
+    best.map(|(_, path)| path)
 }
 
 /// Builds the tray menu from the current account list.
@@ -127,41 +155,93 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .build()
 }
 
+/// Outcome of a tray swap click emitted as `tray-swap-complete`.
+#[derive(serde::Serialize, Clone)]
+struct TraySwapResult {
+    account: u16,
+    /// The config dir that was retargeted, if any.
+    config_dir: Option<String>,
+    /// `true` on success; `false` if no dir found or swap failed.
+    ok: bool,
+    /// Human-readable error if `ok == false`.
+    error: Option<String>,
+}
+
 /// Performs the blocking swap work for a tray `acct:{id}` click.
 ///
-/// Enumerates every live config-* dir and retargets each to the
-/// clicked account. Runs on a tokio `spawn_blocking` worker — must
-/// not be invoked from the Tauri main thread.
-fn perform_tray_swap(base: &Path, account: AccountNum) -> (usize, usize) {
-    let config_dirs = list_all_config_dirs(base);
-    let mut ok = 0usize;
-    let mut err = 0usize;
-    for cd in &config_dirs {
-        match rotation::swap_to(base, cd, account) {
-            Ok(res) => {
-                log::info!("tray swap ok: account {} -> {}", res.account, cd.display());
-                ok += 1;
+/// Retargets the **single most recently modified** `config-N` dir
+/// to the clicked account. Running on a tokio `spawn_blocking`
+/// worker — MUST not be invoked from the Tauri main thread.
+///
+/// # Why one dir, not all
+///
+/// Retargeting every live `config-*` dir would silently collapse a
+/// multi-session workflow (5 CC sessions on 5 accounts → all on
+/// one account) with no confirmation. The most-recently-modified
+/// dir approximates "the session the user is actively using" and
+/// matches the intent of a tray quick-switch.
+fn perform_tray_swap(base: &Path, account: AccountNum) -> TraySwapResult {
+    let target_dir = match most_recent_config_dir(base) {
+        Some(d) => d,
+        None => {
+            log::warn!(
+                "tray swap: no live config-N dir under {} — start a CC session first",
+                base.display()
+            );
+            return TraySwapResult {
+                account: account.get(),
+                config_dir: None,
+                ok: false,
+                error: Some("no live CC session found".into()),
+            };
+        }
+    };
+
+    match rotation::swap_to(base, &target_dir, account) {
+        Ok(res) => {
+            log::info!(
+                "tray swap ok: account {} -> {}",
+                res.account,
+                target_dir.display()
+            );
+            TraySwapResult {
+                account: account.get(),
+                config_dir: Some(target_dir.display().to_string()),
+                ok: true,
+                error: None,
             }
-            Err(e) => {
-                log::warn!(
-                    "tray swap failed: account {} -> {}: {}",
-                    account,
-                    cd.display(),
-                    e
-                );
-                err += 1;
+        }
+        Err(e) => {
+            log::warn!(
+                "tray swap failed: account {} -> {}: {}",
+                account,
+                target_dir.display(),
+                e
+            );
+            TraySwapResult {
+                account: account.get(),
+                config_dir: Some(target_dir.display().to_string()),
+                ok: false,
+                error: Some(e.to_string()),
             }
         }
     }
-    (ok, err)
 }
+
+/// Serialization guard for tray clicks — atomic "is a swap in
+/// flight?" flag. Prevents concurrent tray clicks from racing each
+/// other's writes to the same config dir. A click arriving while
+/// another swap is in-flight is dropped with a log line (not
+/// queued — queuing leads to confusing "which click won?" UX).
+static SWAP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Handles a tray menu click.
 ///
 /// Account rows dispatch the swap work to a `spawn_blocking` worker
 /// so the Tauri main thread (UI, tray rendering) stays responsive.
-/// Also refreshes the menu immediately after the swap completes so
-/// any label changes show without waiting for the next 30s tick.
+/// Concurrent clicks are serialized via `SWAP_IN_FLIGHT` — a
+/// subsequent click while a swap is running is dropped to avoid
+/// non-deterministic writes.
 fn handle_tray_event(app: &AppHandle, id: &str) {
     match id {
         "open" => {
@@ -190,19 +270,36 @@ fn handle_tray_event(app: &AppHandle, id: &str) {
             };
             let Some(base) = base_dir() else { return };
 
+            // Serialize: drop the click if another swap is in
+            // flight. Release-ordered CAS so only one worker runs.
+            use std::sync::atomic::Ordering;
+            if SWAP_IN_FLIGHT
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                log::warn!(
+                    "tray click ignored: account {} — another swap is in flight",
+                    n
+                );
+                return;
+            }
+
             let app_handle = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let (ok, err) = perform_tray_swap(&base, account);
-                // Notify the frontend — a listener in the dashboard
-                // can show a toast / refresh data.
-                let _ = app_handle.emit(
-                    "tray-swap-complete",
-                    serde_json::json!({
-                        "account": account.get(),
-                        "ok": ok,
-                        "err": err,
-                    }),
-                );
+                // RAII guard so the flag always clears, even on
+                // panic inside perform_tray_swap.
+                struct ClearFlag;
+                impl Drop for ClearFlag {
+                    fn drop(&mut self) {
+                        SWAP_IN_FLIGHT.store(false, Ordering::Release);
+                    }
+                }
+                let _clear = ClearFlag;
+
+                let result = perform_tray_swap(&base, account);
+                if let Err(e) = app_handle.emit("tray-swap-complete", &result) {
+                    log::warn!("failed to emit tray-swap-complete: {e}");
+                }
             });
         }
         _ => {}
@@ -232,12 +329,31 @@ pub fn run() {
             commands::start_login,
         ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            // ── Logging ────────────────────────────────────────
+            // tauri-plugin-log installs a `log` facade sink. We
+            // enable it in BOTH debug and release so tray-click
+            // errors (H1) and Windows mutex fallback warnings (H4)
+            // are observable. In release mode the plugin defaults
+            // to logging to the OS-appropriate app-data dir
+            // (Library/Logs/csq-desktop on macOS, etc.).
+            let log_level = if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            };
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log_level)
+                    .build(),
+            )?;
+
+            // Bridge `tracing` events from csq-core into the `log`
+            // facade so warnings emitted by the lock, daemon, and
+            // oauth modules also land in the desktop log sink. The
+            // LogTracer must be installed after the log facade has
+            // a sink, otherwise the bridge forwards to nothing.
+            if let Err(e) = tracing_log::LogTracer::init() {
+                log::warn!("failed to install tracing→log bridge: {e}");
             }
 
             // ── Auto-updater ─────────────────────────────────
