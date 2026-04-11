@@ -693,7 +693,7 @@ fn verify_peer_uid(_stream: &tokio::net::UnixStream) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

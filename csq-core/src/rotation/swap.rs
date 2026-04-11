@@ -186,7 +186,11 @@ mod tests {
     /// per-account refresh-lock while overwriting the canonical
     /// credential file. `swap_to` must block until the lock is
     /// released and read the FRESH canonical, not the stale one.
+    ///
+    /// Windows named mutexes are re-entrant within a process, so this
+    /// cross-thread lock-contention test only works with flock (Unix).
     #[test]
+    #[cfg(unix)]
     fn swap_waits_for_refresh_lock_c5_regression() {
         use crate::platform::lock;
         use std::sync::{Arc, Barrier};

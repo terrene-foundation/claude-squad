@@ -47,6 +47,7 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+        timeout-minutes: 15
 
   # ── Clippy lint ─────────────────────────────────────────────
   clippy:
