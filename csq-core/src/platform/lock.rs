@@ -140,8 +140,35 @@ mod imp {
     }
 
     fn mutex_name(path: &Path) -> Vec<u16> {
-        // Use the path as a unique mutex name, prefixed with "Global\"
-        let name = format!("Global\\csq-lock-{}", path.display());
+        // Windows named mutex naming rules:
+        //   1. Names cannot contain backslashes EXCEPT for the single
+        //      `Global\` or `Local\` namespace-prefix separator.
+        //   2. The `Global\` namespace requires `SeCreateGlobalPrivilege`,
+        //      which standard (non-elevated) user accounts lack — attempts
+        //      return ERROR_PATH_NOT_FOUND (3).
+        //   3. Names without a namespace prefix default to `Local\`
+        //      (per-session), which is exactly what a user-scoped file
+        //      lock needs.
+        //
+        // We therefore derive a namespace-free name by hashing the path
+        // with SHA-256 and taking the first 16 hex chars as the
+        // discriminator.  The result is collision-resistant on a single
+        // machine and free of any reserved characters.
+        //
+        // NOTE — same-process/same-thread re-entrancy: Windows named
+        // mutexes are re-entrant within the same thread.
+        // `WaitForSingleObject` returns WAIT_OBJECT_0 immediately if the
+        // calling thread already owns the mutex, so same-thread
+        // contention tests are unreliable.  Cross-thread and
+        // cross-process tests work correctly.
+        use sha2::{Digest, Sha256};
+
+        let path_str = path.to_string_lossy();
+        let digest = Sha256::digest(path_str.as_bytes());
+        // 16 hex chars = 64 bits of the hash — sufficient collision
+        // resistance for file-system lock paths on a single machine.
+        let hash_hex = hex::encode(&digest[..8]);
+        let name = format!("csq-lock-{hash_hex}");
         name.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
@@ -275,5 +302,64 @@ mod tests {
         let guard = lock_file(&lock_path).unwrap();
         let s = format!("{guard:?}");
         assert!(s.contains("FileLockGuard"));
+    }
+
+    /// Verify that the Windows mutex name derivation produces a name
+    /// with no backslashes at all — neither from the input path nor
+    /// from a namespace prefix.  The unprefixed name defaults to the
+    /// `Local\` session namespace, which is what a user-scoped lock
+    /// needs and which does not require elevated privileges.
+    #[test]
+    #[cfg(windows)]
+    fn mutex_name_no_backslashes_at_all() {
+        use std::path::Path;
+
+        // Typical Windows temp path full of backslashes.
+        let path = Path::new(r"C:\Users\runner\AppData\Local\Temp\test.lock");
+        let wide = imp::mutex_name(path);
+
+        // Decode back to a String for inspection.
+        let decoded = String::from_utf16(&wide[..wide.len() - 1]).unwrap();
+
+        // No backslashes anywhere — using the default (Local) namespace.
+        assert!(
+            !decoded.contains('\\'),
+            "mutex name must not contain backslashes: {decoded}"
+        );
+
+        // The name must be exactly "csq-lock-" followed by 16 hex chars.
+        assert!(
+            decoded.starts_with("csq-lock-"),
+            "unexpected name: {decoded}"
+        );
+        let hash_part = &decoded["csq-lock-".len()..];
+        assert_eq!(hash_part.len(), 16, "expected 16-char hash, got: {hash_part}");
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash contains non-hex chars: {hash_part}"
+        );
+    }
+
+    /// Two distinct paths must produce distinct mutex names.
+    #[test]
+    #[cfg(windows)]
+    fn mutex_name_distinct_for_distinct_paths() {
+        use std::path::Path;
+
+        let a = imp::mutex_name(Path::new(r"C:\Temp\a.lock"));
+        let b = imp::mutex_name(Path::new(r"C:\Temp\b.lock"));
+        assert_ne!(a, b, "different paths must yield different mutex names");
+    }
+
+    /// The same path must always produce the same mutex name (deterministic).
+    #[test]
+    #[cfg(windows)]
+    fn mutex_name_deterministic() {
+        use std::path::Path;
+
+        let path = Path::new(r"C:\Temp\stable.lock");
+        let first = imp::mutex_name(path);
+        let second = imp::mutex_name(path);
+        assert_eq!(first, second);
     }
 }
