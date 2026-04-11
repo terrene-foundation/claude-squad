@@ -350,26 +350,27 @@ pub fn run() {
         .setup(|app| {
             // ── Logging ────────────────────────────────────────
             //
-            // Two independent logging facades are wired up:
+            // Two independent logging facades coexist:
             //
             // 1. **tracing** — csq-core emits via `tracing::warn!`
-            //    etc. We install a global `tracing_subscriber::fmt`
-            //    subscriber with an env filter so those events
-            //    reach stderr (captured by the launcher) and — in
-            //    release — a rotating file under the user's app-
-            //    data dir.
+            //    etc. A `tracing_subscriber::fmt` subscriber
+            //    writes those events to stderr filtered by
+            //    `CSQ_LOG` (default: `warn`).
             //
-            // 2. **log** — this crate and `tauri-plugin-log`
-            //    itself use the `log` facade for webview and
-            //    Tauri-lifecycle messages. `tauri-plugin-log`
-            //    installs the `log` sink in both debug and
-            //    release so tray-click errors (H1) are observable.
+            // 2. **log** — `tauri-plugin-log` claims the `log`
+            //    facade for tray-click errors and plugin
+            //    lifecycle messages. Output goes to the OS app-
+            //    data log dir (Console.app on macOS, etc.).
             //
-            // We do NOT try to bridge tracing→log: `tracing_log`
-            // bridges the opposite direction (log→tracing) and a
-            // correct tracing→log adapter is more trouble than a
-            // second subscriber. Both systems coexist and write to
-            // their own sinks.
+            // **Critical**: `tracing-subscriber`'s default
+            // features include `tracing-log`, which would make
+            // `try_init()` silently call `log::set_logger`. That
+            // then collides with `tauri-plugin-log`'s own
+            // `set_boxed_logger` and panics the app at startup.
+            // The workspace `tracing-subscriber` dep is
+            // configured with `default-features = false` +
+            // explicit `fmt`/`env-filter`/`std`/`ansi`/`smallvec`
+            // to avoid this collision. See Cargo.toml.
             let filter = tracing_subscriber::EnvFilter::try_from_env("CSQ_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
             let _ = tracing_subscriber::fmt()
@@ -441,4 +442,146 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    // ── sanitize_label ──────────────────────────────────────
+
+    #[test]
+    fn sanitize_label_strips_control_chars() {
+        assert_eq!(sanitize_label("alice\nbob"), "alicebob");
+        assert_eq!(sanitize_label("a\tb\rc"), "abc");
+        assert_eq!(sanitize_label("x\u{0}y"), "xy");
+    }
+
+    #[test]
+    fn sanitize_label_strips_bidi_overrides() {
+        // U+202E is Right-to-Left Override (homograph attack)
+        assert_eq!(
+            sanitize_label("gro.eniRrreT\u{202E}@alice"),
+            "gro.eniRrreT@alice"
+        );
+        // U+2066..=U+2069 are isolates
+        assert_eq!(sanitize_label("a\u{2066}b\u{2069}c"), "abc");
+        // U+202A..=U+202D are other bidi controls
+        assert_eq!(sanitize_label("a\u{202A}b\u{202B}c\u{202C}d"), "abcd");
+    }
+
+    #[test]
+    fn sanitize_label_caps_length() {
+        let long = "x".repeat(200);
+        let out = sanitize_label(&long);
+        assert_eq!(out.chars().count(), MAX_LABEL_LEN);
+    }
+
+    #[test]
+    fn sanitize_label_empty_returns_placeholder() {
+        assert_eq!(sanitize_label(""), "unknown");
+        // Also when everything gets stripped.
+        assert_eq!(sanitize_label("\n\r\t"), "unknown");
+    }
+
+    #[test]
+    fn sanitize_label_preserves_normal_unicode() {
+        assert_eq!(sanitize_label("alice@example.com"), "alice@example.com");
+        // Non-ASCII but not a control/bidi char.
+        assert_eq!(sanitize_label("Ålice"), "Ålice");
+    }
+
+    // ── most_recent_config_dir ──────────────────────────────
+
+    fn touch_credentials(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(".credentials.json"), b"{}").unwrap();
+    }
+
+    #[test]
+    fn most_recent_picks_newest_credentials_mtime() {
+        let base = TempDir::new().unwrap();
+        touch_credentials(&base.path().join("config-1"));
+        thread::sleep(Duration::from_millis(20));
+        touch_credentials(&base.path().join("config-2"));
+        thread::sleep(Duration::from_millis(20));
+        touch_credentials(&base.path().join("config-3"));
+
+        let result = most_recent_config_dir(base.path()).unwrap();
+        assert_eq!(result.file_name().unwrap(), "config-3");
+    }
+
+    #[test]
+    fn most_recent_skips_dirs_without_credentials() {
+        let base = TempDir::new().unwrap();
+        fs::create_dir_all(base.path().join("config-1")).unwrap();
+        touch_credentials(&base.path().join("config-2"));
+
+        let result = most_recent_config_dir(base.path()).unwrap();
+        assert_eq!(result.file_name().unwrap(), "config-2");
+    }
+
+    #[test]
+    fn most_recent_rejects_out_of_range_numbers() {
+        let base = TempDir::new().unwrap();
+        touch_credentials(&base.path().join("config-0"));
+        touch_credentials(&base.path().join("config-1000"));
+
+        assert!(most_recent_config_dir(base.path()).is_none());
+    }
+
+    #[test]
+    fn most_recent_rejects_non_numeric_suffix() {
+        let base = TempDir::new().unwrap();
+        touch_credentials(&base.path().join("config-abc"));
+        touch_credentials(&base.path().join("config-"));
+
+        assert!(most_recent_config_dir(base.path()).is_none());
+    }
+
+    #[test]
+    fn most_recent_rejects_non_config_prefix() {
+        let base = TempDir::new().unwrap();
+        touch_credentials(&base.path().join("other-1"));
+        touch_credentials(&base.path().join("xconfig-1"));
+
+        assert!(most_recent_config_dir(base.path()).is_none());
+    }
+
+    #[test]
+    fn most_recent_returns_none_on_empty_dir() {
+        let base = TempDir::new().unwrap();
+        assert!(most_recent_config_dir(base.path()).is_none());
+    }
+
+    #[test]
+    fn most_recent_returns_none_when_base_missing() {
+        let base = TempDir::new().unwrap();
+        let missing = base.path().join("missing-dir");
+        assert!(most_recent_config_dir(&missing).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn most_recent_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let base = TempDir::new().unwrap();
+        // Real dir outside base that we want to protect.
+        let outside = TempDir::new().unwrap();
+        touch_credentials(outside.path());
+
+        // Create a symlink config-5 → outside. file_type() must NOT
+        // follow the symlink, so this must be rejected.
+        symlink(outside.path(), base.path().join("config-5")).unwrap();
+
+        assert!(
+            most_recent_config_dir(base.path()).is_none(),
+            "symlinks must be rejected to prevent writes outside base_dir"
+        );
+    }
 }
