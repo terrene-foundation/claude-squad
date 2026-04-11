@@ -12,6 +12,7 @@ use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 
 /// Keychain account parameter (matches CC's usage).
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "credentials";
 
 /// Derives the keychain service name for a given CC config directory.

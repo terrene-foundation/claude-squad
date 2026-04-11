@@ -206,6 +206,13 @@ mod tests {
     #[test]
     fn detect_missing_pid_file_is_not_running() {
         let dir = TempDir::new().unwrap();
+        // On Linux, pid_file_path() uses $XDG_RUNTIME_DIR if set.
+        // Override it to the temp dir so the test checks the right
+        // location and doesn't collide with parallel tests.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        }
         assert_eq!(detect_daemon(dir.path()), DetectResult::NotRunning);
     }
 

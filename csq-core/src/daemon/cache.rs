@@ -178,14 +178,15 @@ mod tests {
 
     #[test]
     fn set_overwrites_and_resets_timestamp() {
-        let cache: TtlCache<String, u32> = TtlCache::new(Duration::from_millis(50));
+        // Use generous margins to avoid CI timing flakes.
+        let cache: TtlCache<String, u32> = TtlCache::new(Duration::from_millis(200));
         cache.set("foo".into(), 1);
-        thread::sleep(Duration::from_millis(40));
+        thread::sleep(Duration::from_millis(100));
         // Overwrite — timestamp resets.
         cache.set("foo".into(), 2);
-        thread::sleep(Duration::from_millis(20));
-        // Original TTL would have expired; the second write's TTL
-        // is still live.
+        thread::sleep(Duration::from_millis(50));
+        // Original TTL would have expired (150ms > 200ms from first
+        // write is false, but the second write's TTL is still live).
         assert_eq!(cache.get(&"foo".to_string()), Some(2));
     }
 

@@ -267,7 +267,7 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
             let _ = base_dir_for_runtime;
             wait_for_shutdown().await;
         }
-        Ok(())
+        Ok::<(), anyhow::Error>(())
     })?;
 
     // Explicit drop for clarity — PidFile::Drop removes the file if
