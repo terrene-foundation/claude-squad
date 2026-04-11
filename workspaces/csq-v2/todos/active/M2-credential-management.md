@@ -14,11 +14,11 @@ Phase: 1, Stream B
 - Scope: 2.1-2.2, GAP-1
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Valid JSON loads correctly
-  - [ ] Missing file returns `CredentialError::NotFound`
-  - [ ] Corrupt file returns `CredentialError::Corrupt`
-  - [ ] Saved file has `0o600` permissions
-  - [ ] `#[serde(flatten)]` preserves unknown fields round-trip
+  - [x] Valid JSON loads correctly
+  - [x] Missing file returns `CredentialError::NotFound`
+  - [x] Corrupt file returns `CredentialError::Corrupt`
+  - [x] Saved file has `0o600` permissions
+  - [x] `#[serde(flatten)]` preserves unknown fields round-trip
 
 ## M2-02: Build account number validation
 
@@ -27,8 +27,8 @@ Phase: 1, Stream B
 - Scope: 2.3
 - Complexity: Trivial
 - Acceptance:
-  - [ ] 1, 7, 999 → valid
-  - [ ] 0, -1, "abc", "../etc", 1000 → invalid
+  - [x] 1, 7, 999 → valid
+  - [x] 0, -1, "abc", "../etc", 1000 → invalid
 
 ## M2-03: Build OAuth token refresh
 
@@ -37,10 +37,10 @@ Phase: 1, Stream B
 - Scope: 2.4, GAP-1 (field preservation)
 - Complexity: Complex
 - Acceptance:
-  - [ ] Mock HTTP server: correct request body
-  - [ ] Response merged: accessToken/refreshToken/expiresAt updated, other fields preserved
-  - [ ] 401 response returns `OAuthError::Http`
-  - [ ] Parity: same request body format as v1.x
+  - [x] Mock HTTP server: correct request body
+  - [x] Response merged: accessToken/refreshToken/expiresAt updated, other fields preserved
+  - [x] 401 response returns `OAuthError::Http`
+  - [x] Parity: same request body format as v1.x
 
 ## M2-04: Build keychain service name derivation
 
@@ -49,9 +49,9 @@ Phase: 1, Stream B
 - Scope: 2.5, GAP-2
 - Complexity: Moderate
 - Acceptance:
-  - [ ] `/Users/test/.claude/accounts/config-1` produces same hash as v1.x Python
-  - [ ] Verify against 5 known paths
-  - [ ] NFC normalization handles Unicode correctly
+  - [x] `/Users/test/.claude/accounts/config-1` produces same hash as v1.x Python
+  - [x] Verify against 5 known paths
+  - [x] NFC normalization handles Unicode correctly
 
 ## M2-05: Build keychain write (macOS hex-encoded)
 
@@ -61,9 +61,9 @@ macOS: `security-framework` crate, hex-encode JSON before writing. Account param
 - Complexity: Moderate
 - Depends: M2-04
 - Acceptance:
-  - [ ] macOS: keychain entry written, readable by `security find-generic-password`
-  - [ ] Hex-decoded payload matches original JSON
-  - [ ] Failure does not propagate (best-effort)
+  - [x] macOS: keychain entry written, readable by `security find-generic-password`
+  - [x] Hex-decoded payload matches original JSON
+  - [x] Failure does not propagate (best-effort)
 
 ## M2-06: Build keychain write (Linux/Windows)
 
@@ -73,9 +73,9 @@ Linux: `keyring` crate with `libsecret` backend, store JSON directly. Windows: `
 - Complexity: Moderate
 - Depends: M2-04
 - Acceptance:
-  - [ ] Linux: entry written if libsecret available, graceful fallback if not
-  - [ ] Windows: entry written to Credential Manager
-  - [ ] JSON round-trips correctly
+  - [x] Linux: entry written if libsecret available, graceful fallback if not
+  - [x] Windows: entry written to Credential Manager
+  - [x] JSON round-trips correctly
 
 ## M2-07: Build credential capture (keychain read + file read)
 
@@ -85,9 +85,9 @@ Read credentials from macOS keychain (hex-decode JSON) or fall back to reading `
 - Complexity: Complex (keychain read), Trivial (file read)
 - Depends: M2-04
 - Acceptance:
-  - [ ] macOS: hex-decoded JSON matches credential structure
-  - [ ] File fallback: reads .credentials.json when keychain fails
-  - [ ] Keychain timeout: does not block >3s
+  - [x] macOS: hex-decoded JSON matches credential structure
+  - [x] File fallback: reads .credentials.json when keychain fails
+  - [x] Keychain timeout: does not block >3s
 
 ## M2-08: Build canonical save + config-dir mirror
 
@@ -97,9 +97,9 @@ Save to `credentials/N.json` (canonical) AND `config-N/.credentials.json` (live)
 - Complexity: Moderate
 - Depends: M2-01
 - Acceptance:
-  - [ ] Both files written atomically
-  - [ ] Both have `0o600`
-  - [ ] Partial failure (canonical succeeds, live fails) is handled
+  - [x] Both files written atomically
+  - [x] Both have `0o600`
+  - [x] Partial failure (canonical succeeds, live fails) is handled
 
 ## M2-09: Integration tests for credential management
 
@@ -108,5 +108,5 @@ Parity tests: keychain service name for known paths. Round-trip load/save. Concu
 - Scope: Phase 1 test strategy
 - Complexity: Moderate
 - Acceptance:
-  - [ ] > 90% line coverage on `credentials/`
-  - [ ] Keychain service name parity test passes
+  - [x] > 90% line coverage on `credentials/`
+  - [x] Keychain service name parity test passes

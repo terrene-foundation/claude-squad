@@ -14,10 +14,10 @@ Thin wrappers in `src-tauri/src/commands/` that call `csq-core` functions and re
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All commands registered in Tauri handler
-  - [ ] Each command validates input at boundary
-  - [ ] No secrets in return types (AccessToken not serializable)
-  - [ ] Errors mapped to typed string codes per GAP-4
+  - [x] All commands registered in Tauri handler
+  - [x] Each command validates input at boundary
+  - [x] No secrets in return types (AccessToken not serializable)
+  - [x] Errors mapped to typed string codes per GAP-4
 
 ## M10-02: Build Tauri security configuration
 
@@ -26,10 +26,10 @@ IPC allowlist: scope commands per-window. CSP headers. Isolation mode if support
 - Scope: New, tauri-commands rule
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Only allowed commands accessible from renderer
-  - [ ] CSP: no `unsafe-eval`, `connect-src` restricted to `platform.claude.com` (S18, S19)
-  - [ ] `freezePrototype: true` in Tauri config (S6)
-  - [ ] DevTools disabled in production build
+  - [x] Only allowed commands accessible from renderer
+  - [x] CSP: no `unsafe-eval`, `connect-src` restricted to `platform.claude.com` (S18, S19)
+  - [x] `freezePrototype: true` in Tauri config (S6)
+  - [x] DevTools disabled in production build
 
 ## M10-03: Build Svelte account list component
 
@@ -38,10 +38,10 @@ Display all accounts with: email, status indicator (active/idle/expired), 5h and
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All accounts rendered
-  - [ ] Active account highlighted
-  - [ ] Usage bars proportional and colored (green/yellow/red)
-  - [ ] Refreshes on interval (5s)
+  - [x] All accounts rendered
+  - [x] Active account highlighted
+  - [x] Usage bars proportional and colored (green/yellow/red)
+  - [x] Refreshes on interval (5s)
 
 ## M10-04: Wire account list to live data
 
@@ -51,9 +51,9 @@ Replace any mock data with live Tauri IPC calls. Account data flows from daemon 
 - Complexity: Moderate
 - Depends: M10-03, M10-01
 - Acceptance:
-  - [ ] Zero mock data in production component
-  - [ ] Data matches daemon's cache
-  - [ ] Empty state handled (no accounts configured)
+  - [x] Zero mock data in production component
+  - [x] Data matches daemon's cache
+  - [x] Empty state handled (no accounts configured)
 
 ## M10-05: Build usage bars component
 
@@ -62,10 +62,10 @@ Per-account usage visualization: 5-hour bar + 7-day bar. Color gradient: green (
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Colors match thresholds
-  - [ ] Tooltip shows "Resets in 2h 15m"
-  - [ ] 100%: shows "Exhausted" label
-  - [ ] No data: shows "No usage data" placeholder
+  - [x] Colors match thresholds
+  - [x] Tooltip shows "Resets in 2h 15m"
+  - [x] 100%: shows "Exhausted" label
+  - [x] No data: shows "No usage data" placeholder
 
 ## M10-05a: Wire usage bars to live data
 
@@ -75,9 +75,9 @@ Connect usage bars to Tauri `get_usage` IPC command. Data flows: daemon poller -
 - Complexity: Moderate
 - Depends: M10-05, M10-01
 - Acceptance:
-  - [ ] Usage data from daemon cache, not computed locally
-  - [ ] Updates when poller refreshes data
-  - [ ] Zero mock data in production path
+  - [x] Usage data from daemon cache, not computed locally
+  - [x] Updates when poller refreshes data
+  - [x] Zero mock data in production path
 
 ## M10-06: Build token health component
 
@@ -86,10 +86,10 @@ Per-account token status: healthy (green dot), expiring soon (yellow), expired (
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Color coding matches health status
-  - [ ] "Expires in 3h 42m" countdown
-  - [ ] "Expired 15m ago" for dead tokens
-  - [ ] "Re-login required" for broker-failed accounts
+  - [x] Color coding matches health status
+  - [x] "Expires in 3h 42m" countdown
+  - [x] "Expired 15m ago" for dead tokens
+  - [x] "Re-login required" for broker-failed accounts
 
 ## M10-07: Wire token health to live data
 
@@ -99,8 +99,8 @@ Connect to Tauri `get_token_status` command. Real-time updates from daemon's ref
 - Complexity: Trivial
 - Depends: M10-06, M10-01
 - Acceptance:
-  - [ ] Token status from daemon, not computed locally
-  - [ ] Updates when daemon refreshes a token
+  - [x] Token status from daemon, not computed locally
+  - [x] Updates when daemon refreshes a token
 
 ## M10-08: Build OAuth login flow UI
 
@@ -110,10 +110,10 @@ Connect to Tauri `get_token_status` command. Real-time updates from daemon's ref
 - Complexity: Complex
 - Depends: M9-03, M9-04
 - Acceptance:
-  - [ ] Browser opens to correct authorize URL
-  - [ ] Waiting state shown with cancel option
-  - [ ] Success: new account appears immediately
-  - [ ] Failure: actionable error message
+  - [x] Browser opens to correct authorize URL
+  - [x] Waiting state shown with cancel option
+  - [x] Success: new account appears immediately
+  - [x] Failure: actionable error message
 
 ## M10-09: Build system tray
 
@@ -122,11 +122,11 @@ macOS menu bar / Linux tray / Windows tray icon. Menu items: account list with s
 - Scope: New
 - Complexity: Complex
 - Acceptance:
-  - [ ] Tray icon appears on launch
-  - [ ] All accounts listed with status
-  - [ ] Quick-swap changes active account
-  - [ ] "Open Dashboard" opens/focuses webview window
-  - [ ] "Quit" triggers graceful shutdown
+  - [x] Tray icon appears on launch
+  - [x] All accounts listed with status
+  - [x] Quick-swap changes active account
+  - [x] "Open Dashboard" opens/focuses webview window
+  - [x] "Quit" triggers graceful shutdown
 
 ## M10-10: Wire system tray to daemon
 
@@ -136,9 +136,9 @@ Tray menu populated from daemon's account cache. Quick-swap calls `swap_to()` vi
 - Complexity: Moderate
 - Depends: M10-09, M8-10
 - Acceptance:
-  - [ ] Tray reflects current daemon state
-  - [ ] Quick-swap completes within 200ms
-  - [ ] Tray updates after token refresh
+  - [x] Tray reflects current daemon state
+  - [x] Quick-swap completes within 200ms
+  - [x] Tray updates after token refresh
 
 ## M10-11: Build dashboard layout and navigation
 
@@ -147,9 +147,9 @@ App shell: sidebar navigation (Accounts, Settings), main content area, header wi
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Layout renders correctly at various window sizes
-  - [ ] Navigation between views works
-  - [ ] Daemon status: green dot (running), red dot (stopped)
+  - [x] Layout renders correctly at various window sizes
+  - [x] Navigation between views works
+  - [x] Daemon status: green dot (running), red dot (stopped)
 
 ## M10-12: Build Tauri auto-update
 
@@ -158,9 +158,9 @@ Ed25519 signed update manifests via `tauri-plugin-updater`. Check on launch + da
 - Scope: New
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Update check on launch
-  - [ ] Signature verification before install
-  - [ ] User prompted before update (not silent)
+  - [x] Update check on launch
+  - [x] Signature verification before install
+  - [x] User prompted before update (not silent)
 
 ## M10-13: Svelte component tests
 
@@ -169,5 +169,5 @@ Vitest + testing-library tests for all components. Account list with mock data. 
 - Scope: Phase 3 test strategy
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All components have tests
-  - [ ] Edge cases covered (empty, expired, error)
+  - [x] All components have tests
+  - [x] Edge cases covered (empty, expired, error)

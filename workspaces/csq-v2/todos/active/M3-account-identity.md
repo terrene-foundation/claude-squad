@@ -14,10 +14,10 @@ Three-step identity resolution: (1) read `.current-account` fast path, (2) extra
 - Scope: 3.1
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Fast path: `.current-account` exists, returns immediately
-  - [ ] Dir name fallback: extracts N from `config-N`
-  - [ ] CC auth fallback: matches email to profiles.json
-  - [ ] All three paths tested independently
+  - [x] Fast path: `.current-account` exists, returns immediately
+  - [x] Dir name fallback: extracts N from `config-N`
+  - [x] CC auth fallback: matches email to profiles.json
+  - [x] All three paths tested independently
 
 ## M3-02: Build account markers (read/write)
 
@@ -26,9 +26,9 @@ Three-step identity resolution: (1) read `.current-account` fast path, (2) extra
 - Scope: 3.2-3.3
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Write + read back matches
-  - [ ] Invalid content handled (non-numeric, out of range)
-  - [ ] Atomic write (no partial content on crash)
+  - [x] Write + read back matches
+  - [x] Invalid content handled (non-numeric, out of range)
+  - [x] Atomic write (no partial content on crash)
 
 ## M3-03: Build token matching
 
@@ -37,9 +37,9 @@ Three-step identity resolution: (1) read `.current-account` fast path, (2) extra
 - Scope: 3.4-3.6
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Access token match: correct account returned
-  - [ ] Refresh token match: correct account even after CC refreshes (new AT, same RT initially)
-  - [ ] No match: returns None, not error
+  - [x] Access token match: correct account returned
+  - [x] Refresh token match: correct account even after CC refreshes (new AT, same RT initially)
+  - [x] No match: returns None, not error
 
 ## M3-04: Build snapshot_account() with PID caching
 
@@ -49,9 +49,9 @@ Triggered from statusline on every render. Cheap path: if `.live-pid` process is
 - Complexity: Complex
 - Depends: M1-06 (process detection), M3-02 (markers)
 - Acceptance:
-  - [ ] First call: walks process tree, writes PID file
-  - [ ] Subsequent calls with same PID alive: no-op (<1ms)
-  - [ ] PID dies: next call re-snapshots
+  - [x] First call: walks process tree, writes PID file
+  - [x] Subsequent calls with same PID alive: no-op (<1ms)
+  - [x] PID dies: next call re-snapshots
 
 ## M3-05: Build Anthropic account discovery
 
@@ -60,9 +60,9 @@ Scan `credentials/*.json` for numeric filenames. Read `claudeAiOauth.accessToken
 - Scope: 3.8-3.10
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Discovers all accounts with valid credential files
-  - [ ] Missing profile: account discovered with "unknown" email
-  - [ ] Invalid JSON credential file: skipped with warning
+  - [x] Discovers all accounts with valid credential files
+  - [x] Missing profile: account discovered with "unknown" email
+  - [x] Invalid JSON credential file: skipped with warning
 
 ## M3-06: Build 3P account discovery
 
@@ -71,8 +71,8 @@ Read `settings-zai.json`, `settings-mm.json` for `ANTHROPIC_AUTH_TOKEN` and `ANT
 - Scope: 3.11
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Discovers Z.AI and MiniMax accounts from settings files
-  - [ ] Missing settings file: no error, empty list
+  - [x] Discovers Z.AI and MiniMax accounts from settings files
+  - [x] Missing settings file: no error, empty list
 
 ## M3-07: Build manual account management
 
@@ -81,9 +81,9 @@ Read `settings-zai.json`, `settings-mm.json` for `ANTHROPIC_AUTH_TOKEN` and `ANT
 - Scope: 3.12-3.13
 - Complexity: Trivial (load), Moderate (save)
 - Acceptance:
-  - [ ] Load: reads accounts from file
-  - [ ] Save: appends without corrupting existing entries
-  - [ ] Atomic write on save
+  - [x] Load: reads accounts from file
+  - [x] Save: appends without corrupting existing entries
+  - [x] Atomic write on save
 
 ## M3-08: Build combined discovery with dedup
 
@@ -92,9 +92,9 @@ Read `settings-zai.json`, `settings-mm.json` for `ANTHROPIC_AUTH_TOKEN` and `ANT
 - Scope: 3.14
 - Complexity: Trivial
 - Acceptance:
-  - [ ] All three sources merged
-  - [ ] Duplicate IDs: first source wins
-  - [ ] Empty sources: no error
+  - [x] All three sources merged
+  - [x] Duplicate IDs: first source wins
+  - [x] Empty sources: no error
 
 ## M3-09: Build profiles.json management
 
@@ -103,6 +103,6 @@ Read `settings-zai.json`, `settings-mm.json` for `ANTHROPIC_AUTH_TOKEN` and `ANT
 - Scope: 3.15-3.16, GAP-7
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Round-trip preserves unknown fields
-  - [ ] Get email for missing account: returns None
-  - [ ] Save preserves other accounts' entries
+  - [x] Round-trip preserves unknown fields
+  - [x] Get email for missing account: returns None
+  - [x] Save preserves other accounts' entries

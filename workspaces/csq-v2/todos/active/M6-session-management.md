@@ -14,10 +14,10 @@ Symlink shared artifacts from `~/.claude` into `config-N/`: history, sessions, c
 - Scope: 11.3
 - Complexity: Complex
 - Acceptance:
-  - [ ] Shared items are symlinks (not copies)
-  - [ ] Isolated items are per-terminal copies
-  - [ ] Existing symlinks: recreated if target changed
-  - [ ] Missing `~/.claude` dirs: created on demand
+  - [x] Shared items are symlinks (not copies)
+  - [x] Isolated items are per-terminal copies
+  - [x] Existing symlinks: recreated if target changed
+  - [x] Missing `~/.claude` dirs: created on demand
 
 ## M6-02: Build Windows junction support
 
@@ -37,9 +37,9 @@ Build per-terminal `settings.json` from default + optional profile overlay. Deep
 - Scope: 11.4
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Overlay keys override defaults
-  - [ ] Nested objects merged recursively
-  - [ ] Truncated JSON repaired before merge
+  - [x] Overlay keys override defaults
+  - [x] Nested objects merged recursively
+  - [x] Truncated JSON repaired before merge
 
 ## M6-04: Build onboarding flag + credential copy
 
@@ -48,9 +48,9 @@ Set `hasCompletedOnboarding=true` in `.claude.json` (skip CC's setup wizard). At
 - Scope: 11.5, 11.7, 11.11
 - Complexity: Trivial
 - Acceptance:
-  - [ ] `.claude.json` updated without corrupting other fields
-  - [ ] Credential copy is atomic
-  - [ ] Stale `.live-pid` removed
+  - [x] `.claude.json` updated without corrupting other fields
+  - [x] Credential copy is atomic
+  - [x] Stale `.live-pid` removed
 
 ## M6-05: Build csq run command (full)
 
@@ -60,14 +60,14 @@ Account auto-resolution: 0 accounts -> vanilla `claude`. 1 account -> uses it. 2
 - Complexity: Complex (assembly of M6-01 through M6-04)
 - Depends: M6-01, M6-03, M6-04, M4-01
 - Acceptance:
-  - [ ] 0 accounts: launches vanilla `claude`
-  - [ ] 1 account: uses it without argument
-  - [ ] 2+ accounts without N: error with account list
-  - [ ] Profile with own auth: OAuth creds skipped
-  - [ ] Broker called before credential copy
-  - [ ] Dead token: clear error message, does not launch CC
-  - [ ] `csq run 1 --resume`: passes `--resume` to claude
-  - [ ] Env vars stripped before exec
+  - [x] 0 accounts: launches vanilla `claude`
+  - [x] 1 account: uses it without argument
+  - [x] 2+ accounts without N: error with account list
+  - [x] Profile with own auth: OAuth creds skipped
+  - [x] Broker called before credential copy
+  - [x] Dead token: clear error message, does not launch CC
+  - [x] `csq run 1 --resume`: passes `--resume` to claude
+  - [x] Env vars stripped before exec
 
 ## M6-06: Wire csq run to daemon
 
@@ -77,5 +77,5 @@ When daemon is running, `csq run` notifies it of the new session start (so the d
 - Complexity: Trivial
 - Depends: M8 (Daemon Core)
 - Acceptance:
-  - [ ] Daemon running: IPC notification sent
-  - [ ] Daemon not running: silent fallback to synchronous broker
+  - [x] Daemon running: IPC notification sent
+  - [x] Daemon not running: silent fallback to synchronous broker
