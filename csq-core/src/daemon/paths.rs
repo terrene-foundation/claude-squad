@@ -63,6 +63,10 @@ pub fn pid_file_path(base_dir: &Path) -> PathBuf {
 /// Windows returns a named-pipe path `\\.\pipe\csq-{username}`.
 /// The username suffix ensures per-user isolation on multi-user boxes.
 pub fn socket_path(base_dir: &Path) -> PathBuf {
+    // base_dir is used on macOS and unknown-Unix only; suppress
+    // unused-variable warnings on Linux and Windows.
+    let _ = &base_dir;
+
     #[cfg(target_os = "linux")]
     {
         if let Some(dir) = xdg_runtime_dir() {
@@ -140,7 +144,10 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
 
         let base = Path::new("/tmp/test-base");
-        assert_eq!(pid_file_path(base), PathBuf::from("/run/user/1000/csq-daemon.pid"));
+        assert_eq!(
+            pid_file_path(base),
+            PathBuf::from("/run/user/1000/csq-daemon.pid")
+        );
         assert_eq!(socket_path(base), PathBuf::from("/run/user/1000/csq.sock"));
 
         match saved {

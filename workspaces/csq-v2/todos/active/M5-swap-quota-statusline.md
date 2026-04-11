@@ -14,10 +14,10 @@ Read cached creds from `credentials/N.json`, write to `.credentials.json` (atomi
 - Scope: 4.1
 - Complexity: Complex
 - Acceptance:
-  - [ ] All three files updated atomically
-  - [ ] Immediate read-back verification succeeds
-  - [ ] `.quota-cursor` NOT deleted during swap
-  - [ ] Parity: same credential files as v1.x swap
+  - [x] All three files updated atomically
+  - [x] Immediate read-back verification succeeds
+  - [x] `.quota-cursor` NOT deleted during swap
+  - [x] Parity: same credential files as v1.x swap
 
 ## M5-02: Build delayed swap verification
 
@@ -27,9 +27,9 @@ Background task checks at +2s if CC overwrote the swap (CC may detect stale cred
 - Complexity: Moderate
 - Depends: M5-01
 - Acceptance:
-  - [ ] 2-second delay fires in background
-  - [ ] Detects if CC overwrote credentials
-  - [ ] Warning logged but swap not retried
+  - [x] 2-second delay fires in background
+  - [x] Detects if CC overwrote credentials
+  - [x] Warning logged but swap not retried
 
 ## M5-03: Build pick_best() and suggest()
 
@@ -38,10 +38,10 @@ Background task checks at +2s if CC overwrote the swap (CC may detect stale cred
 - Scope: 4.2-4.3
 - Complexity: Moderate (pick_best), Trivial (suggest)
 - Acceptance:
-  - [ ] Picks lowest 5h usage
-  - [ ] All exhausted: picks earliest reset
-  - [ ] Suggest JSON format matches v1.x
-  - [ ] Current account excluded from suggestion
+  - [x] Picks lowest 5h usage
+  - [x] All exhausted: picks earliest reset
+  - [x] Suggest JSON format matches v1.x
+  - [x] Current account excluded from suggestion
 
 ## M5-04: Build update_quota() with payload-hash cursor
 
@@ -50,10 +50,10 @@ Parse statusline JSON from CC, extract `rate_limits`. Use `live_credentials_acco
 - Scope: 6.1, GAP-3
 - Complexity: Complex
 - Acceptance:
-  - [ ] Correct account attributed via refresh token match
-  - [ ] Stale payload after swap: rejected by cursor
-  - [ ] Concurrent updates: file lock prevents corruption
-  - [ ] QuotaFile struct per GAP-3 schema
+  - [x] Correct account attributed via refresh token match
+  - [x] Stale payload after swap: rejected by cursor
+  - [x] Concurrent updates: file lock prevents corruption
+  - [x] QuotaFile struct per GAP-3 schema
 
 ## M5-05: Build quota state management
 
@@ -62,9 +62,9 @@ Parse statusline JSON from CC, extract `rate_limits`. Use `live_credentials_acco
 - Scope: 6.2
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Expired 5h window cleared on load
-  - [ ] Expired 7d window cleared on load
-  - [ ] Missing file: returns empty state
+  - [x] Expired 5h window cleared on load
+  - [x] Expired 7d window cleared on load
+  - [x] Missing file: returns empty state
 
 ## M5-06: Build statusline_str() with indicators
 
@@ -73,10 +73,10 @@ Compact statusline: `#N:user 5h:X% 7d:Y%`. Stuck-swap warning (`#N!:user`). Brok
 - Scope: 6.4
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Normal format matches v1.x exactly
-  - [ ] Stuck swap: `!` indicator shown
-  - [ ] Broker failure: `LOGIN-NEEDED` prefix
-  - [ ] Stale flag (>24h): auto-cleared
+  - [x] Normal format matches v1.x exactly
+  - [x] Stuck swap: `!` indicator shown
+  - [x] Broker failure: `LOGIN-NEEDED` prefix
+  - [x] Stale flag (>24h): auto-cleared
 
 ## M5-07: Build fmt_time() and fmt_tokens()
 
@@ -85,8 +85,8 @@ Compact statusline: `#N:user 5h:X% 7d:Y%`. Stuck-swap warning (`#N!:user`). Brok
 - Scope: 6.5, 12.6
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Edge cases: 0, 59, 60, 3599, 3600, 86399, 86400
-  - [ ] Token formatting matches v1.x output
+  - [x] Edge cases: 0, 59, 60, 3599, 3600, 86399, 86400
+  - [x] Token formatting matches v1.x output
 
 ## M5-08: Build csq statusline command
 
@@ -95,10 +95,10 @@ Replaces `statusline-quota.sh` entirely. Reads CC's JSON from stdin. Calls snaps
 - Scope: 12.1-12.7
 - Complexity: Complex
 - Acceptance:
-  - [ ] Same CC JSON input produces identical output as v1.x bash script
-  - [ ] Completes within 50ms (vs 400ms v1.x baseline)
-  - [ ] Background sync doesn't block output
-  - [ ] Git status shows branch + dirty indicator
+  - [x] Same CC JSON input produces identical output as v1.x bash script
+  - [x] Completes within 50ms (vs 400ms v1.x baseline)
+  - [x] Background sync doesn't block output
+  - [x] Git status shows branch + dirty indicator
 
 ## M5-09: Build show_status() command
 
@@ -107,6 +107,6 @@ Display all accounts: active marker, email, 5h/7d usage percentages, reset times
 - Scope: 6.3
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Format matches v1.x `csq status` output
-  - [ ] Active account marked
-  - [ ] Missing quota: shows "no data"
+  - [x] Format matches v1.x `csq status` output
+  - [x] Active account marked
+  - [x] Missing quota: shows "no data"

@@ -14,8 +14,8 @@ Compile-time platform detection via `cfg(target_os)`. Constants: `IS_MACOS`, `IS
 - Scope: 1.1-1.2
 - Complexity: Trivial
 - Acceptance:
-  - [ ] `Platform::current()` returns correct variant
-  - [ ] `cfg` gates compile on all targets
+  - [x] `Platform::current()` returns correct variant
+  - [x] `cfg` gates compile on all targets
 
 ## M1-02: Build secure file permissions
 
@@ -24,8 +24,8 @@ Compile-time platform detection via `cfg(target_os)`. Constants: `IS_MACOS`, `IS
 - Scope: 1.5
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Unix: file mode is `0o600` after call
-  - [ ] Windows: no error, no-op
+  - [x] Unix: file mode is `0o600` after call
+  - [x] Windows: no error, no-op
 
 ## M1-03: Build atomic file replace
 
@@ -34,8 +34,8 @@ Compile-time platform detection via `cfg(target_os)`. Constants: `IS_MACOS`, `IS
 - Scope: 1.6
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Concurrent writers (10 threads, 100 writes each): no corruption
-  - [ ] Windows: locked file retries succeed within 500ms
+  - [x] Concurrent writers (10 threads, 100 writes each): no corruption
+  - [x] Windows: locked file retries succeed within 500ms
 
 ## M1-04: Build POSIX file locking
 
@@ -44,8 +44,8 @@ Compile-time platform detection via `cfg(target_os)`. Constants: `IS_MACOS`, `IS
 - Scope: 1.7-1.8, 1.11
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Two processes: one holds lock, other's try_lock returns None
-  - [ ] Lock released on drop (RAII guard)
+  - [x] Two processes: one holds lock, other's try_lock returns None
+  - [x] Lock released on drop (RAII guard)
 
 ## M1-05: Build Windows named mutex locking
 
@@ -66,9 +66,9 @@ Compile-time platform detection via `cfg(target_os)`. Constants: `IS_MACOS`, `IS
 - Scope: 1.12, 1.14, 1.16
 - Complexity: Complex
 - Acceptance:
-  - [ ] Own PID: alive. PID 99999999: dead
-  - [ ] Spawn mock process tree: correct CC PID found
-  - [ ] "node /usr/local/bin/claude" → true, "/bin/bash" → false
+  - [x] Own PID: alive. PID 99999999: dead
+  - [x] Spawn mock process tree: correct CC PID found
+  - [x] "node /usr/local/bin/claude" → true, "/bin/bash" → false
 
 ## M1-07: Build Windows process detection
 
@@ -87,5 +87,5 @@ Cross-platform integration tests: concurrent file locking, atomic writes under c
 - Scope: Phase 1 test strategy
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All platform tests pass on macOS, Linux, Windows CI
-  - [ ] > 90% line coverage on `platform/`
+  - [x] All platform tests pass on macOS, Linux, Windows CI
+  - [x] > 90% line coverage on `platform/`

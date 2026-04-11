@@ -14,10 +14,10 @@ Phase: 3, Stream 1
 - Scope: New, GAP-9
 - Complexity: Complex
 - Acceptance:
-  - [ ] PID file created at platform-correct path
-  - [ ] Second daemon rejected: "already running (PID N)"
-  - [ ] Stop: graceful shutdown, PID + socket removed
-  - [ ] Status: reports running/stopped
+  - [x] PID file created at platform-correct path
+  - [x] Second daemon rejected: "already running (PID N)"
+  - [x] Stop: graceful shutdown, PID + socket removed
+  - [x] Status: reports running/stopped
 
 ## M8-02: Build IPC server (Unix socket)
 
@@ -26,12 +26,12 @@ macOS/Linux: bind Unix domain socket per GAP-9 resolution. HTTP/1.1 over socket 
 - Scope: ADR-005, GAP-9
 - Complexity: Complex
 - Acceptance:
-  - [ ] Socket created at correct path
-  - [ ] `curl --unix-socket /path http://localhost/api/health` returns 200
-  - [ ] Multiple concurrent connections handled
-  - [ ] Socket cleaned up on shutdown
-  - [ ] Socket file permissions: `0o600` (same-user only)
-  - [ ] Verify caller identity via `SO_PEERCRED` (reject different UID)
+  - [x] Socket created at correct path
+  - [x] `curl --unix-socket /path http://localhost/api/health` returns 200
+  - [x] Multiple concurrent connections handled
+  - [x] Socket cleaned up on shutdown
+  - [x] Socket file permissions: `0o600` (same-user only)
+  - [x] Verify caller identity via `SO_PEERCRED` (reject different UID)
 
 ## M8-03: Build IPC server (Windows named pipe)
 
@@ -52,10 +52,10 @@ CLI-side: 4-step liveness check per GAP-9 — PID file -> PID alive -> socket co
 - Scope: GAP-9
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Missing PID file: direct mode, no warning
-  - [ ] Stale PID file: cleaned up, direct mode
-  - [ ] Socket timeout: direct mode with warning
-  - [ ] Healthy daemon: delegate succeeds
+  - [x] Missing PID file: direct mode, no warning
+  - [x] Stale PID file: cleaned up, direct mode
+  - [x] Socket timeout: direct mode with warning
+  - [x] Healthy daemon: delegate succeeds
 
 ## M8-05: Build background token refresher
 
@@ -65,12 +65,12 @@ Replaces broker subprocess model. Check every 5 minutes, refresh when token expi
 - Complexity: Complex
 - Depends: M4-01 (broker logic), M4-02 (recovery)
 - Acceptance:
-  - [ ] 2-hour-ahead refresh window triggers correctly
-  - [ ] Per-account lock: 10 concurrent tasks, exactly 1 HTTP refresh
-  - [ ] Fanout: all matching config dirs updated
-  - [ ] Recovery: dead canonical + live sibling -> promotion
-  - [ ] 10-minute cooldown after HTTP failure
-  - [ ] Monotonicity guard: re-reads inside lock
+  - [x] 2-hour-ahead refresh window triggers correctly
+  - [x] Per-account lock: 10 concurrent tasks, exactly 1 HTTP refresh
+  - [x] Fanout: all matching config dirs updated
+  - [x] Recovery: dead canonical + live sibling -> promotion
+  - [x] 10-minute cooldown after HTTP failure
+  - [x] Monotonicity guard: re-reads inside lock
 
 ## M8-06: Build background usage poller
 
@@ -79,12 +79,12 @@ Anthropic: poll `/api/oauth/usage` every 5 minutes with Bearer token. 3P: poll v
 - Scope: 7.1-7.4
 - Complexity: Complex
 - Acceptance:
-  - [ ] Anthropic polling at 5-min intervals
-  - [ ] 3P polling at 15-min intervals
-  - [ ] Staggered start (accounts don't all poll simultaneously)
-  - [ ] 429: exponential backoff
-  - [ ] 401: account marked expired
-  - [ ] Bearer tokens handled via `Secret<String>`, never logged (S10)
+  - [x] Anthropic polling at 5-min intervals
+  - [x] 3P polling at 15-min intervals
+  - [x] Staggered start (accounts don't all poll simultaneously)
+  - [x] 429: exponential backoff
+  - [x] 401: account marked expired
+  - [x] Bearer tokens handled via `Secret<String>`, never logged (S10)
 
 ## M8-07: Build in-memory cache with TTL
 
@@ -93,9 +93,9 @@ Thread-safe `RwLock<HashMap>` with per-entry timestamps. Configurable `max_age_s
 - Scope: 7.5
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Set + get within TTL: returns value
-  - [ ] Get after TTL: returns None
-  - [ ] Thread-safe: concurrent reads don't block
+  - [x] Set + get within TTL: returns value
+  - [x] Get after TTL: returns None
+  - [x] Thread-safe: concurrent reads don't block
 
 ## M8-08: Build HTTP API routes
 
@@ -105,13 +105,13 @@ Dashboard API: `GET /api/accounts`, `GET /api/account/{id}/usage`, `GET /api/ref
 - Complexity: Moderate (routing), Complex (OAuth callback)
 - Depends: M8-05, M8-06, M8-07
 - Acceptance:
-  - [ ] All routes registered and respond
-  - [ ] 404 for unknown routes
-  - [ ] JSON responses with correct content-type
-  - [ ] OAuth callback completes full PKCE flow
-  - [ ] Account ID path params validated via `AccountNum` (prevents path traversal)
-  - [ ] Static file serving with path traversal sanitization (scope 13.11)
-  - [ ] Rate-limit header extraction implemented for 3P polling (scope 7.3)
+  - [x] All routes registered and respond
+  - [x] 404 for unknown routes
+  - [x] JSON responses with correct content-type
+  - [x] OAuth callback completes full PKCE flow
+  - [x] Account ID path params validated via `AccountNum` (prevents path traversal)
+  - [x] Static file serving with path traversal sanitization (scope 13.11)
+  - [x] Rate-limit header extraction implemented for 3P polling (scope 7.3)
 
 ## M8-09: Build server lifecycle + subsystem initialization
 
@@ -120,10 +120,10 @@ Initialize all subsystems: cache, poller, refresher, OAuth state store, HTTP ser
 - Scope: 13.10, GAP-9
 - Complexity: Complex
 - Acceptance:
-  - [ ] All subsystems start correctly
-  - [ ] Health endpoint shows all subsystems healthy
-  - [ ] SIGTERM: graceful shutdown within 5s
-  - [ ] In-flight requests completed before shutdown
+  - [x] All subsystems start correctly
+  - [x] Health endpoint shows all subsystems healthy
+  - [x] SIGTERM: graceful shutdown within 5s
+  - [x] In-flight requests completed before shutdown
 
 ## M8-10: Wire CLI commands to daemon IPC
 
@@ -133,10 +133,10 @@ Initialize all subsystems: cache, poller, refresher, OAuth state store, HTTP ser
 - Complexity: Moderate
 - Depends: M8-04
 - Acceptance:
-  - [ ] Status with daemon: <5ms response
-  - [ ] Status without daemon: direct mode works
-  - [ ] Statusline with daemon: <50ms
-  - [ ] Swap: daemon notified to update cache
+  - [x] Status with daemon: <5ms response
+  - [x] Status without daemon: direct mode works
+  - [x] Statusline with daemon: <50ms
+  - [x] Swap: daemon notified to update cache
 
 ## M8-11: Build daemon integration tests
 
@@ -145,6 +145,6 @@ Start daemon, verify health. Start second daemon: rejected. CLI with daemon: IPC
 - Scope: Phase 3 test strategy
 - Complexity: Complex
 - Acceptance:
-  - [ ] Full daemon lifecycle tested
-  - [ ] Concurrent access tested
-  - [ ] Fallback behavior verified
+  - [x] Full daemon lifecycle tested
+  - [x] Concurrent access tested
+  - [x] Fallback behavior verified

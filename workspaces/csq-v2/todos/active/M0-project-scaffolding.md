@@ -14,10 +14,10 @@ Create root `Cargo.toml` with three workspace members: `csq-core` (library), `cs
 - Scope: GAP-5
 - Complexity: Moderate
 - Acceptance:
-  - [ ] `cargo build` succeeds
-  - [ ] `cargo build -p csq-core` produces library
-  - [ ] `cargo build -p csq-cli` produces `csq` binary
-  - [ ] Workspace deps shared (serde, tokio, thiserror, anyhow)
+  - [x] `cargo build` succeeds
+  - [x] `cargo build -p csq-core` produces library
+  - [x] `cargo build -p csq-cli` produces `csq` binary
+  - [x] Workspace deps shared (serde, tokio, thiserror, anyhow)
 
 ## M0-02: Initialize Tauri project skeleton
 
@@ -27,9 +27,9 @@ Create `src-tauri/` with `tauri.conf.json`, `capabilities/main.json`, and minima
 - Complexity: Moderate
 - Depends: M0-01
 - Acceptance:
-  - [ ] `cargo tauri dev` launches window on macOS
-  - [ ] Svelte frontend renders "csq v2.0" placeholder
-  - [ ] `tauri.conf.json` has correct bundle identifier
+  - [x] `cargo tauri dev` launches window on macOS
+  - [x] Svelte frontend renders "csq v2.0" placeholder
+  - [x] `tauri.conf.json` has correct bundle identifier
 
 ## M0-03: Set up CI pipeline
 
@@ -51,9 +51,9 @@ Enable `clippy::pedantic`. Configure `rustfmt.toml`. Add `cargo deny` for licens
 - Complexity: Trivial
 - Depends: M0-01
 - Acceptance:
-  - [ ] `just lint` runs clippy + rustfmt check
-  - [ ] `just test` runs cargo test
-  - [ ] `cargo deny check` passes
+  - [x] `just lint` runs clippy + rustfmt check
+  - [x] `just test` runs cargo test
+  - [x] `cargo deny check` passes
 
 ## M0-05: Define cross-cutting types
 
@@ -63,11 +63,11 @@ Create `AccountNum` newtype (validated 1..MAX_ACCOUNTS via `TryFrom<u16>`). Crea
 - Complexity: Moderate
 - Depends: M0-01
 - Acceptance:
-  - [ ] `AccountNum::try_from(0)` returns `Err`
-  - [ ] `AccountNum::try_from(1)` returns `Ok`
-  - [ ] `format!("{}", access_token)` shows `sk-ant-oat01-...xxxx`
-  - [ ] `AccessToken` does not implement `Serialize` (prevents accidental IPC leak)
-  - [ ] Token types use `secrecy::Secret<String>` with zeroize-on-drop (security finding S10)
+  - [x] `AccountNum::try_from(0)` returns `Err`
+  - [x] `AccountNum::try_from(1)` returns `Ok`
+  - [x] `format!("{}", access_token)` shows `sk-ant-oat01-...xxxx`
+  - [x] `AccessToken` does not implement `Serialize` (prevents accidental IPC leak)
+  - [x] Token types use `secrecy::Secret<String>` with zeroize-on-drop (security finding S10)
 
 ## M0-06: Set up error handling and logging
 
@@ -77,9 +77,9 @@ Create `csq-core/src/error.rs` with `CsqError` hierarchy per GAP-4 resolution. S
 - Complexity: Moderate
 - Depends: M0-01
 - Acceptance:
-  - [ ] `CsqError` compiles with all module error variants
-  - [ ] `CSQ_LOG=debug csq` shows trace output
-  - [ ] Each error variant produces a readable `Display` message
+  - [x] `CsqError` compiles with all module error variants
+  - [x] `CSQ_LOG=debug csq` shows trace output
+  - [x] Each error variant produces a readable `Display` message
 
 ## M0-07: Harden .gitignore
 
@@ -88,5 +88,5 @@ Ensure `.gitignore` includes: `config-*/`, `.credentials.json`, `.env`, `credent
 - Scope: Security analysis H1
 - Complexity: Trivial
 - Acceptance:
-  - [ ] All credential-bearing paths listed in .gitignore
-  - [ ] `git status` does not show credential files
+  - [x] All credential-bearing paths listed in .gitignore
+  - [x] `git status` does not show credential files

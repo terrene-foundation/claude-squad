@@ -14,9 +14,9 @@ Phase: 3
 - Scope: 9.4-9.5
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Verifier: 43 chars, URL-safe alphabet
-  - [ ] Challenge: SHA256(verifier), base64url-encoded, no padding
-  - [ ] Matches RFC 7636 Appendix B test vectors
+  - [x] Verifier: 43 chars, URL-safe alphabet
+  - [x] Challenge: SHA256(verifier), base64url-encoded, no padding
+  - [x] Matches RFC 7636 Appendix B test vectors
 
 ## M9-02: Build OAuth state store with TTL
 
@@ -25,10 +25,10 @@ Phase: 3
 - Scope: GAP-10
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Fresh state: lookup succeeds
-  - [ ] Expired state (>10min): rejected with StateExpired
-  - [ ] Consumed state: second lookup fails (single-use)
-  - [ ] 101st entry: oldest evicted
+  - [x] Fresh state: lookup succeeds
+  - [x] Expired state (>10min): rejected with StateExpired
+  - [x] Consumed state: second lookup fails (single-use)
+  - [x] 101st entry: oldest evicted
 
 ## M9-03: Build OAuth login initiation
 
@@ -37,10 +37,10 @@ Phase: 3
 - Scope: 9.1
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Authorize URL contains all required params
-  - [ ] State stored in state store
-  - [ ] URL is well-formed and URL-encoded
-  - [ ] Callback listener binds to `127.0.0.1` only (not `0.0.0.0`) — security finding S12
+  - [x] Authorize URL contains all required params
+  - [x] State stored in state store
+  - [x] URL is well-formed and URL-encoded
+  - [x] Callback listener binds to `127.0.0.1` only (not `0.0.0.0`) — security finding S12
 
 ## M9-04: Build OAuth callback handler
 
@@ -50,11 +50,11 @@ Phase: 3
 - Complexity: Complex
 - Depends: M9-02, M9-05
 - Acceptance:
-  - [ ] State consumed (replay rejected)
-  - [ ] Missing state: CSRF error
-  - [ ] Code exchanged successfully
-  - [ ] Credentials saved atomically
-  - [ ] Profile updated with email
+  - [x] State consumed (replay rejected)
+  - [x] Missing state: CSRF error
+  - [x] Code exchanged successfully
+  - [x] Credentials saved atomically
+  - [x] Profile updated with email
 
 ## M9-05: Build code-for-token exchange
 
@@ -63,6 +63,6 @@ Phase: 3
 - Scope: 9.3
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Mock server: correct request body format
-  - [ ] Successful exchange: CredentialFile returned
-  - [ ] Error response: OAuthError::Exchange
+  - [x] Mock server: correct request body format
+  - [x] Successful exchange: CredentialFile returned
+  - [x] Error response: OAuthError::Exchange

@@ -20,13 +20,17 @@
 //! path for the same `(accounts, quota)` pair.
 
 use anyhow::Result;
-use csq_core::accounts::{markers, AccountInfo};
-use csq_core::quota::status::{compose_status, show_status, AccountStatus};
+use csq_core::accounts::markers;
+use csq_core::quota::status::{show_status, AccountStatus};
 use csq_core::types::AccountNum;
 use std::path::Path;
 
 #[cfg(unix)]
+use csq_core::accounts::AccountInfo;
+#[cfg(unix)]
 use csq_core::daemon::{self, DetectResult};
+#[cfg(unix)]
+use csq_core::quota::status::compose_status;
 
 pub fn handle(base_dir: &Path, json: bool) -> Result<()> {
     // Try to resolve active account from current config dir marker

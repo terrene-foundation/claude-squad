@@ -165,8 +165,9 @@ fn unix_health_check(pid: u32, sock_path: &Path) -> DetectResult {
                     break;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 return DetectResult::Unhealthy {
                     reason: format!("health read: {e}"),
@@ -205,6 +206,33 @@ mod tests {
     #[test]
     fn detect_missing_pid_file_is_not_running() {
         let dir = TempDir::new().unwrap();
+
+        // pid_file_path() uses platform-specific storage:
+        //   * Linux: $XDG_RUNTIME_DIR/csq-daemon.pid
+        //   * macOS: {base_dir}/csq-daemon.pid
+        //   * Windows: %LOCALAPPDATA%\csq\csq-daemon.pid
+        //
+        // On Linux and Windows, the default path is shared across
+        // tests running in parallel — we must override the env var
+        // so this test checks an isolated location. macOS uses
+        // base_dir directly so no override is needed there.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        }
+        #[cfg(target_os = "windows")]
+        unsafe {
+            std::env::set_var("LOCALAPPDATA", dir.path());
+        }
+
+        // Clean up any leftover PID file that a previous test run
+        // may have written to the pid_file_path location — the
+        // LOCALAPPDATA override moves us to a fresh tempdir, but a
+        // sibling test may have already set the env to some other
+        // value that already contains a stale PID file.
+        let pid_path = super::super::pid_file_path(dir.path());
+        let _ = fs::remove_file(&pid_path);
+
         assert_eq!(detect_daemon(dir.path()), DetectResult::NotRunning);
     }
 
@@ -249,8 +277,10 @@ mod tests {
 
         match detect_daemon(dir.path()) {
             DetectResult::Stale { reason } => {
-                assert!(reason.contains("socket") && reason.contains("missing"),
-                        "reason: {reason}");
+                assert!(
+                    reason.contains("socket") && reason.contains("missing"),
+                    "reason: {reason}"
+                );
             }
             other => panic!("expected Stale, got {other:?}"),
         }

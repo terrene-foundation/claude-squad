@@ -14,10 +14,10 @@ Per-account try-lock. Read canonical credentials, check expiry (2-hour window pe
 - Scope: 5.1
 - Complexity: Complex
 - Acceptance:
-  - [ ] 10 concurrent tasks: exactly 1 HTTP refresh call made
-  - [ ] Token not near expiry: no refresh, returns quickly
-  - [ ] Lock contention: skips gracefully (no error)
-  - [ ] Successful refresh: fans out to all matching config dirs
+  - [x] 10 concurrent tasks: exactly 1 HTTP refresh call made
+  - [x] Token not near expiry: no refresh, returns quickly
+  - [x] Lock contention: skips gracefully (no error)
+  - [x] Successful refresh: fans out to all matching config dirs
 
 ## M4-02: Build broker recovery from live siblings
 
@@ -26,10 +26,10 @@ When canonical RT is dead (CC won a refresh race and rotated the RT): scan all `
 - Scope: 5.2
 - Complexity: Complex
 - Acceptance:
-  - [ ] Dead canonical + live sibling with good RT: promotion + successful refresh
-  - [ ] All siblings dead: marks broker-failed, returns error
-  - [ ] Total failure: original canonical restored (rollback)
-  - [ ] Recovery restores correct state after multi-terminal race
+  - [x] Dead canonical + live sibling with good RT: promotion + successful refresh
+  - [x] All siblings dead: marks broker-failed, returns error
+  - [x] Total failure: original canonical restored (rollback)
+  - [x] Recovery restores correct state after multi-terminal race
 
 ## M4-03: Build config dir scanning
 
@@ -38,9 +38,9 @@ When canonical RT is dead (CC won a refresh race and rotated the RT): scan all `
 - Scope: 5.3
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Finds all config dirs with matching marker
-  - [ ] Ignores dirs without `.csq-account` file
-  - [ ] Handles corrupt marker gracefully
+  - [x] Finds all config dirs with matching marker
+  - [x] Ignores dirs without `.csq-account` file
+  - [x] Handles corrupt marker gracefully
 
 ## M4-04: Build credential fanout
 
@@ -49,9 +49,9 @@ When canonical RT is dead (CC won a refresh race and rotated the RT): scan all `
 - Scope: 5.4
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All matching dirs updated atomically
-  - [ ] Already-in-sync dirs skipped (no unnecessary writes)
-  - [ ] Single dir failure doesn't stop fanout to others
+  - [x] All matching dirs updated atomically
+  - [x] Already-in-sync dirs skipped (no unnecessary writes)
+  - [x] Single dir failure doesn't stop fanout to others
 
 ## M4-05: Build broker failure flags
 
@@ -60,9 +60,9 @@ Touch `credentials/N.broker-failed` on total broker failure. Remove on successfu
 - Scope: 5.5
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Flag created on failure
-  - [ ] Flag removed on recovery or login
-  - [ ] `is_broker_failed(account)` reads flag
+  - [x] Flag created on failure
+  - [x] Flag removed on recovery or login
+  - [x] `is_broker_failed(account)` reads flag
 
 ## M4-06: Build backsync with monotonicity guard
 
@@ -71,11 +71,11 @@ Live `.credentials.json` -> canonical `credentials/N.json` when live is newer. C
 - Scope: 5.6
 - Complexity: Complex
 - Acceptance:
-  - [ ] Live newer: canonical updated
-  - [ ] Live older: canonical NOT updated (monotonicity)
-  - [ ] RT match: correct account identified
-  - [ ] Marker fallback: works when RT has been rotated
-  - [ ] Re-read inside lock: concurrent backsync safe
+  - [x] Live newer: canonical updated
+  - [x] Live older: canonical NOT updated (monotonicity)
+  - [x] RT match: correct account identified
+  - [x] Marker fallback: works when RT has been rotated
+  - [x] Re-read inside lock: concurrent backsync safe
 
 ## M4-07: Build pullsync with strict-newer check
 
@@ -84,9 +84,9 @@ Canonical `credentials/N.json` -> live `.credentials.json` when canonical is new
 - Scope: 5.7
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Canonical newer: live updated
-  - [ ] Canonical older: live NOT updated
-  - [ ] Same access token: skipped (no unnecessary write)
+  - [x] Canonical newer: live updated
+  - [x] Canonical older: live NOT updated
+  - [x] Same access token: skipped (no unnecessary write)
 
 ## M4-08: Integration tests for broker/sync
 
@@ -95,6 +95,6 @@ Mock HTTP server for token refresh. Concurrent broker test (10 tasks, 1 refresh)
 - Scope: Phase 1 test strategy
 - Complexity: Complex
 - Acceptance:
-  - [ ] All broker/sync tests pass
-  - [ ] Race conditions covered by concurrent test
-  - [ ] Recovery tested with dead canonical + live sibling
+  - [x] All broker/sync tests pass
+  - [x] Race conditions covered by concurrent test
+  - [x] Recovery tested with dead canonical + live sibling

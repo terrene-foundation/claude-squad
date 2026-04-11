@@ -1,4 +1,4 @@
-name: Cross-Platform Tests
+name: CI
 
 on:
   push:
@@ -6,25 +6,135 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned Rust version. Must match `rust-toolchain.toml` — the toml
+  # is for local developers, this env var is for CI. Bump deliberately
+  # in its own PR and verify `cargo clippy -D warnings` passes first.
+  RUST_VERSION: 1.94.1
+  # Bump this to bust all cargo caches after a corruption incident.
+  CACHE_VERSION: v1
+
 jobs:
-  test:
-    name: Test on ${{ matrix.os }}
+  # ── Rust tests (core + CLI + desktop) ───────────────────────
+  rust-test:
+    name: Rust tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      # rust-toolchain.toml at repo root pins the version; rustup
+      # reads it automatically. Explicit components are added on
+      # top so we don't depend on the toolchain file listing them.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          python-version: ${{ matrix.python-version }}
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
 
-      - name: Run smoke tests (bash)
-        # On Windows, GitHub Actions provides Git Bash. `shell: bash` uses it.
-        shell: bash
-        run: bash test-platform.sh
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-
+
+      - name: Install Linux system deps (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Run tests
+        run: cargo test --workspace
+        timeout-minutes: 25
+
+  # ── Clippy lint ─────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-
+
+      - name: Install Linux system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        timeout-minutes: 20
+
+  # ── Rust format check ──────────────────────────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        timeout-minutes: 5
+
+  # ── Svelte tests ────────────────────────────────────────────
+  svelte-test:
+    name: Svelte tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: csq-desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: csq-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        timeout-minutes: 5
+
+      - name: Run tests
+        run: npx vitest run
+        timeout-minutes: 10

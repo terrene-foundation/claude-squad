@@ -79,9 +79,9 @@ Reports: binary version, daemon status, account count + credential health, Claud
 - Scope: New (P2)
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All-green on correctly configured system
-  - [ ] Red items with actionable fix suggestions
-  - [ ] Works without daemon running
+  - [x] All-green on correctly configured system
+  - [x] Red items with actionable fix suggestions
+  - [x] Works without daemon running
 
 ## M11-08: Build shell completions
 
@@ -90,8 +90,8 @@ Reports: binary version, daemon status, account count + credential health, Claud
 - Scope: New (P2)
 - Complexity: Trivial
 - Acceptance:
-  - [ ] `csq <TAB>` completes subcommands in bash/zsh
-  - [ ] `csq run <TAB>` shows account numbers
+  - [x] `csq <TAB>` completes subcommands in bash/zsh
+  - [x] `csq run <TAB>` shows account numbers
 
 ## M11-09: Build --json output for all commands
 
@@ -100,9 +100,9 @@ All commands support `--json` flag for machine-readable output. Structured JSON 
 - Scope: New (P2)
 - Complexity: Moderate
 - Acceptance:
-  - [ ] `csq status --json` outputs valid JSON
-  - [ ] `csq suggest --json` outputs valid JSON
-  - [ ] Schema consistent across commands
+  - [x] `csq status --json` outputs valid JSON
+  - [x] `csq suggest --json` outputs valid JSON
+  - [x] Schema consistent across commands
 
 ## M11-10: Build v1.x migration in csq install
 
@@ -111,11 +111,11 @@ Detect v1.x artifacts: `statusline-command.sh`, `rotate.md`, `auto-rotate-hook.s
 - Scope: 14.5 + migration strategy
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Fresh system with v1.x: migration succeeds
-  - [ ] Credentials preserved (same JSON format)
-  - [ ] settings.json updated to `csq statusline`
-  - [ ] Modified v1.x files: backed up as `.bak`
-  - [ ] `csq doctor` reports all-green after migration
+  - [x] Fresh system with v1.x: migration succeeds
+  - [x] Credentials preserved (same JSON format)
+  - [x] settings.json updated to `csq statusline`
+  - [x] Modified v1.x files: backed up as `.bak`
+  - [x] `csq doctor` reports all-green after migration
 
 ## M11-11: Cross-platform smoke tests
 

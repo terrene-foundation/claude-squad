@@ -14,9 +14,9 @@ Define provider skeletons: claude (ANTHROPIC_API_KEY), mm (MiniMax M2.7), zai (Z
 - Scope: 10.2, 10.9
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All 4 providers defined with correct defaults
-  - [ ] Model catalog deserializes from embedded JSON
-  - [ ] `get_provider("mm")` returns MiniMax config
+  - [x] All 4 providers defined with correct defaults
+  - [x] Model catalog deserializes from embedded JSON
+  - [x] `get_provider("mm")` returns MiniMax config
 
 ## M7-02: Build csq setkey
 
@@ -25,11 +25,11 @@ Set API key for provider profile. Read key from arg or stdin (keeps out of shell
 - Scope: 10.1, 10.3, 10.5
 - Complexity: Complex
 - Acceptance:
-  - [ ] Stdin reading works (key not in shell history)
-  - [ ] First use: skeleton created with correct env/model defaults
-  - [ ] Existing profile: fields preserved, key updated
-  - [ ] Key validation: 200 = valid, 401 = invalid, timeout = warning
-  - [ ] Non-Claude: system prompt primers set
+  - [x] Stdin reading works (key not in shell history)
+  - [x] First use: skeleton created with correct env/model defaults
+  - [x] Existing profile: fields preserved, key updated
+  - [x] Key validation: 200 = valid, 401 = invalid, timeout = warning
+  - [x] Non-Claude: system prompt primers set
 
 ## M7-03: Build key validation HTTP probe
 
@@ -38,10 +38,10 @@ Send `max_tokens=1` test request to provider endpoint with the provided key. Rep
 - Scope: 10.10
 - Complexity: Moderate
 - Acceptance:
-  - [ ] Mock server: correct request format
-  - [ ] 200: "valid"
-  - [ ] 401/403: "invalid key"
-  - [ ] Timeout: "unreachable" warning
+  - [x] Mock server: correct request format
+  - [x] 200: "valid"
+  - [x] 401/403: "invalid key"
+  - [x] Timeout: "unreachable" warning
 
 ## M7-04: Build JSON auto-repair for truncated profiles
 
@@ -50,9 +50,9 @@ Detect truncated `settings-*.json` (1-3 missing closing braces). Repair by appen
 - Scope: 10.11
 - Complexity: Moderate
 - Acceptance:
-  - [ ] `{"a": 1` repaired to `{"a": 1}`
-  - [ ] `{"a": {"b": 1}` repaired to `{"a": {"b": 1}}`
-  - [ ] Valid JSON: no modification
+  - [x] `{"a": 1` repaired to `{"a": 1}`
+  - [x] `{"a": {"b": 1}` repaired to `{"a": {"b": 1}}`
+  - [x] Valid JSON: no modification
 
 ## M7-05: Build Ollama integration
 
@@ -61,8 +61,8 @@ Detect truncated `settings-*.json` (1-3 missing closing braces). Repair by appen
 - Scope: 10.8
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Parses `ollama list` output correctly
-  - [ ] Ollama not installed: returns empty list, no error
+  - [x] Parses `ollama list` output correctly
+  - [x] Ollama not installed: returns empty list, no error
 
 ## M7-06: Build csq listkeys and csq rmkey
 
@@ -71,9 +71,9 @@ Detect truncated `settings-*.json` (1-3 missing closing braces). Repair by appen
 - Scope: 10.3-10.4
 - Complexity: Trivial
 - Acceptance:
-  - [ ] Keys properly masked in output
-  - [ ] Missing profile: error message
-  - [ ] rmkey: file deleted
+  - [x] Keys properly masked in output
+  - [x] Missing profile: error message
+  - [x] rmkey: file deleted
 
 ## M7-07: Build csq models (list, list-provider, switch)
 
@@ -82,10 +82,10 @@ List all models across providers. List models for a specific provider (including
 - Scope: 10.5-10.7
 - Complexity: Moderate
 - Acceptance:
-  - [ ] List all: shows models grouped by provider
-  - [ ] List provider: includes Ollama live models
-  - [ ] Switch: all 5 model keys updated atomically
-  - [ ] Unknown model: rejected with suggestion
+  - [x] List all: shows models grouped by provider
+  - [x] List provider: includes Ollama live models
+  - [x] Switch: all 5 model keys updated atomically
+  - [x] Unknown model: rejected with suggestion
 
 ## M7-08: Build csq login (browser flow)
 
@@ -95,10 +95,10 @@ Opens browser via `claude auth login` with isolated `CLAUDE_CONFIG_DIR`. Post-lo
 - Complexity: Complex
 - Depends: M2-05 (keychain), M2-08 (canonical save)
 - Acceptance:
-  - [ ] `claude auth login` invoked with correct `CLAUDE_CONFIG_DIR`
-  - [ ] Email captured and saved to profiles.json
-  - [ ] Credentials captured from keychain or file
-  - [ ] Broker-failure flag cleared
+  - [x] `claude auth login` invoked with correct `CLAUDE_CONFIG_DIR`
+  - [x] Email captured and saved to profiles.json
+  - [x] Credentials captured from keychain or file
+  - [x] Broker-failure flag cleared
 
 ## M7-09: Build csq install (self-installing binary)
 
@@ -107,10 +107,10 @@ Create directories (`~/.claude/accounts/`, `credentials/`), set permissions (700
 - Scope: 14.1-14.2, 14.5
 - Complexity: Complex
 - Acceptance:
-  - [ ] Directories created with correct permissions
-  - [ ] settings.json patched: statusline uses `csq statusline`
-  - [ ] v1.x artifacts: check for modifications before deleting, preserve as `.bak` if modified
-  - [ ] Idempotent: running twice is safe
+  - [x] Directories created with correct permissions
+  - [x] settings.json patched: statusline uses `csq statusline`
+  - [x] v1.x artifacts: check for modifications before deleting, preserve as `.bak` if modified
+  - [x] Idempotent: running twice is safe
 
 ## M7-10: Build csq update + auto_update_bg()
 
@@ -133,11 +133,11 @@ Create directories (`~/.claude/accounts/`, `credentials/`), set permissions (700
 - Scope: 15.1-15.4
 - Complexity: Moderate
 - Acceptance:
-  - [ ] `csq` → `csq run` (default)
-  - [ ] `csq 3` → `csq run 3`
-  - [ ] `csq --help` shows all subcommands
-  - [ ] `csq --version` shows version
-  - [ ] Unknown subcommand: helpful error
+  - [x] `csq` → `csq run` (default)
+  - [x] `csq 3` → `csq run 3`
+  - [x] `csq --help` shows all subcommands
+  - [x] `csq --version` shows version
+  - [x] Unknown subcommand: helpful error
 
 ## M7-12: End-to-end CLI parity tests
 
@@ -146,5 +146,5 @@ For each CLI command, create test fixtures with same input as v1.x. Verify ident
 - Scope: Phase 2 test strategy
 - Complexity: Moderate
 - Acceptance:
-  - [ ] All parity tests pass
-  - [ ] Deterministic commands produce byte-identical output
+  - [x] All parity tests pass
+  - [x] Deterministic commands produce byte-identical output
