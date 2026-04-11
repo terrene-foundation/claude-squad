@@ -10,4 +10,5 @@ pub mod providers;
 pub mod quota;
 pub mod rotation;
 pub mod session;
+pub mod sessions;
 pub mod types;
