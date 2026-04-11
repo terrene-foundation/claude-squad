@@ -139,48 +139,106 @@ mod imp {
         }
     }
 
-    fn mutex_name(path: &Path) -> Vec<u16> {
-        // Windows named mutex naming rules:
-        //   1. Names cannot contain backslashes EXCEPT for the single
-        //      `Global\` or `Local\` namespace-prefix separator.
-        //   2. The `Global\` namespace requires `SeCreateGlobalPrivilege`,
-        //      which standard (non-elevated) user accounts lack — attempts
-        //      return ERROR_PATH_NOT_FOUND (3).
-        //   3. Names without a namespace prefix default to `Local\`
-        //      (per-session), which is exactly what a user-scoped file
-        //      lock needs.
-        //
-        // We therefore derive a namespace-free name by hashing the path
-        // with SHA-256 and taking the first 16 hex chars as the
-        // discriminator.  The result is collision-resistant on a single
-        // machine and free of any reserved characters.
-        //
-        // NOTE — same-process/same-thread re-entrancy: Windows named
-        // mutexes are re-entrant within the same thread.
-        // `WaitForSingleObject` returns WAIT_OBJECT_0 immediately if the
-        // calling thread already owns the mutex, so same-thread
-        // contention tests are unreliable.  Cross-thread and
-        // cross-process tests work correctly.
-        use sha2::{Digest, Sha256};
+    // Win32 error codes we care about when falling back from the
+    // Global namespace to the session-local namespace.
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_PRIVILEGE_NOT_HELD: u32 = 1314;
 
-        let path_str = path.to_string_lossy();
-        let digest = Sha256::digest(path_str.as_bytes());
-        // 16 hex chars = 64 bits of the hash — sufficient collision
-        // resistance for file-system lock paths on a single machine.
-        let hash_hex = hex::encode(&digest[..8]);
-        let name = format!("csq-lock-{hash_hex}");
+    /// Produces a mutex name hash from a path.
+    ///
+    /// Hashes the raw wide-char path on Windows (not the lossy
+    /// UTF-8 form) so non-UTF-8 sequences and surrogate halves
+    /// don't collide on `U+FFFD`. Uses the full path — callers
+    /// can pre-canonicalize if case-insensitivity matters.
+    fn hash_path(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // Convert u16 to bytes for hashing (little-endian).
+        let mut bytes = Vec::with_capacity(wide.len() * 2);
+        for u in &wide {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        let digest = Sha256::digest(&bytes);
+        // 16 hex chars = 64 bits — sufficient collision resistance
+        // for the file-system lock paths on a single machine.
+        hex::encode(&digest[..8])
+    }
+
+    /// Produces a Windows named mutex name for a path.
+    ///
+    /// `use_global` selects the namespace:
+    ///   * `true`  — `Global\csq-lock-{hash}` (visible across all
+    ///                 Terminal Services sessions on the machine)
+    ///   * `false` — `csq-lock-{hash}` (implicit `Local\` — per-
+    ///                 session only)
+    ///
+    /// The Global namespace requires `SeCreateGlobalPrivilege`,
+    /// which standard (non-elevated) user accounts lack.  Attempts
+    /// to open a Global mutex without the privilege return
+    /// `ERROR_ACCESS_DENIED` (5) or `ERROR_PRIVILEGE_NOT_HELD`
+    /// (1314) — NOT `ERROR_PATH_NOT_FOUND`, despite a previous
+    /// comment claiming otherwise.
+    ///
+    /// NOTE — same-process/same-thread re-entrancy: Windows named
+    /// mutexes are re-entrant within the same thread.
+    /// `WaitForSingleObject` returns WAIT_OBJECT_0 immediately if
+    /// the calling thread already owns the mutex, so same-thread
+    /// contention tests are unreliable.  Cross-thread and cross-
+    /// process tests work correctly.
+    fn mutex_name(path: &Path, use_global: bool) -> Vec<u16> {
+        let hash_hex = hash_path(path);
+        let name = if use_global {
+            format!("Global\\csq-lock-{hash_hex}")
+        } else {
+            format!("csq-lock-{hash_hex}")
+        };
         name.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn lock_file(path: &Path) -> Result<FileLockGuard, PlatformError> {
-        let name = mutex_name(path);
-        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        if handle.is_null() {
+    /// Attempts `CreateMutexW` with the Global namespace first.
+    ///
+    /// Falls back to the implicit Local namespace if the Global
+    /// open is rejected with `ERROR_ACCESS_DENIED` or
+    /// `ERROR_PRIVILEGE_NOT_HELD`.  Any other error is returned
+    /// as-is so bugs are surfaced rather than silently fallen-back.
+    fn create_mutex_with_fallback(path: &Path) -> Result<*mut std::ffi::c_void, PlatformError> {
+        // Try Global first — gives correct cross-session semantics
+        // on elevated accounts and daemons.
+        let global_name = mutex_name(path, true);
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, global_name.as_ptr()) };
+        if !handle.is_null() {
+            return Ok(handle);
+        }
+
+        let err = unsafe { GetLastError() };
+        if err == ERROR_ACCESS_DENIED || err == ERROR_PRIVILEGE_NOT_HELD {
+            // Expected on standard user accounts — fall back to
+            // Local\ namespace. This is per-session only: two
+            // Terminal Services sessions for the same user will
+            // not serialize. See red-team H4 for the caveat.
+            warn!(
+                "Global\\ mutex denied (error {err}); falling back to session-local namespace. \
+                 Cross-session serialization is not guaranteed for standard user accounts."
+            );
+            let local_name = mutex_name(path, false);
+            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, local_name.as_ptr()) };
+            if !handle.is_null() {
+                return Ok(handle);
+            }
             return Err(PlatformError::Win32 {
                 code: unsafe { GetLastError() },
-                message: "CreateMutexW failed".into(),
+                message: "CreateMutexW failed in Local namespace after Global fallback".into(),
             });
         }
+
+        Err(PlatformError::Win32 {
+            code: err,
+            message: "CreateMutexW failed".into(),
+        })
+    }
+
+    pub fn lock_file(path: &Path) -> Result<FileLockGuard, PlatformError> {
+        let handle = create_mutex_with_fallback(path)?;
 
         let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
         match wait_result {
@@ -209,15 +267,7 @@ mod imp {
     }
 
     pub fn try_lock_file(path: &Path) -> Result<Option<FileLockGuard>, PlatformError> {
-        let name = mutex_name(path);
-        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        if handle.is_null() {
-            return Err(PlatformError::Win32 {
-                code: unsafe { GetLastError() },
-                message: "CreateMutexW failed".into(),
-            });
-        }
-
+        let handle = create_mutex_with_fallback(path)?;
         let wait_result = unsafe { WaitForSingleObject(handle, 0) };
         match wait_result {
             WAIT_OBJECT_0 => Ok(Some(FileLockGuard {
@@ -304,43 +354,53 @@ mod tests {
         assert!(s.contains("FileLockGuard"));
     }
 
-    /// Verify that the Windows mutex name derivation produces a name
-    /// with no backslashes at all — neither from the input path nor
-    /// from a namespace prefix.  The unprefixed name defaults to the
-    /// `Local\` session namespace, which is what a user-scoped lock
-    /// needs and which does not require elevated privileges.
+    /// The Local (unprefixed) mutex name must contain no
+    /// backslashes anywhere, even when the input path contains
+    /// them — the path is hashed, not embedded.
     #[test]
     #[cfg(windows)]
-    fn mutex_name_no_backslashes_at_all() {
+    fn mutex_name_local_no_backslashes() {
         use std::path::Path;
 
-        // Typical Windows temp path full of backslashes.
         let path = Path::new(r"C:\Users\runner\AppData\Local\Temp\test.lock");
-        let wide = imp::mutex_name(path);
-
-        // Decode back to a String for inspection.
+        let wide = imp::mutex_name(path, /* use_global = */ false);
         let decoded = String::from_utf16(&wide[..wide.len() - 1]).unwrap();
 
-        // No backslashes anywhere — using the default (Local) namespace.
         assert!(
             !decoded.contains('\\'),
-            "mutex name must not contain backslashes: {decoded}"
+            "Local mutex name must not contain backslashes: {decoded}"
         );
-
-        // The name must be exactly "csq-lock-" followed by 16 hex chars.
         assert!(
             decoded.starts_with("csq-lock-"),
             "unexpected name: {decoded}"
         );
+
         let hash_part = &decoded["csq-lock-".len()..];
-        assert_eq!(
-            hash_part.len(),
-            16,
-            "expected 16-char hash, got: {hash_part}"
-        );
+        assert_eq!(hash_part.len(), 16);
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The Global mutex name has exactly one backslash (the
+    /// `Global\` namespace separator) and never anything from the
+    /// path itself.
+    #[test]
+    #[cfg(windows)]
+    fn mutex_name_global_has_only_namespace_separator() {
+        use std::path::Path;
+
+        let path = Path::new(r"C:\Users\runner\AppData\Local\Temp\test.lock");
+        let wide = imp::mutex_name(path, /* use_global = */ true);
+        let decoded = String::from_utf16(&wide[..wide.len() - 1]).unwrap();
+
         assert!(
-            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "hash contains non-hex chars: {hash_part}"
+            decoded.starts_with("Global\\csq-lock-"),
+            "unexpected: {decoded}"
+        );
+        // Exactly one backslash, and only in the namespace prefix.
+        assert_eq!(
+            decoded.chars().filter(|c| *c == '\\').count(),
+            1,
+            "Global name must have exactly one backslash (namespace separator): {decoded}"
         );
     }
 
@@ -350,20 +410,20 @@ mod tests {
     fn mutex_name_distinct_for_distinct_paths() {
         use std::path::Path;
 
-        let a = imp::mutex_name(Path::new(r"C:\Temp\a.lock"));
-        let b = imp::mutex_name(Path::new(r"C:\Temp\b.lock"));
+        let a = imp::mutex_name(Path::new(r"C:\Temp\a.lock"), false);
+        let b = imp::mutex_name(Path::new(r"C:\Temp\b.lock"), false);
         assert_ne!(a, b, "different paths must yield different mutex names");
     }
 
-    /// The same path must always produce the same mutex name (deterministic).
+    /// The same path must always produce the same mutex name.
     #[test]
     #[cfg(windows)]
     fn mutex_name_deterministic() {
         use std::path::Path;
 
         let path = Path::new(r"C:\Temp\stable.lock");
-        let first = imp::mutex_name(path);
-        let second = imp::mutex_name(path);
+        let first = imp::mutex_name(path, false);
+        let second = imp::mutex_name(path, false);
         assert_eq!(first, second);
     }
 }

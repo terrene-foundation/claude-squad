@@ -1,13 +1,15 @@
 mod commands;
 
-use csq_core::accounts::{discovery, markers, AccountInfo};
-use csq_core::broker::fanout;
+use csq_core::accounts::discovery;
 use csq_core::rotation;
 use csq_core::types::AccountNum;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Maximum length of an account label shown in the tray.
+const MAX_LABEL_LEN: usize = 64;
 
 /// Returns the base directory for csq state — `~/.claude/accounts`.
 ///
@@ -20,52 +22,94 @@ fn base_dir() -> Option<PathBuf> {
     Some(home.join(".claude").join("accounts"))
 }
 
-/// Discovers accounts and finds the currently active one (if any).
+/// Sanitizes a label for display in the tray menu.
 ///
-/// Active detection scans config-* dirs for a `.csq-account` marker
-/// that matches the current `CLAUDE_CONFIG_DIR`. Returns `(accounts,
-/// active_id)`.
-fn discover_for_tray(base: &std::path::Path) -> (Vec<AccountInfo>, Option<u16>) {
-    let accounts = discovery::discover_anthropic(base);
+/// Strips control characters and Unicode bidirectional overrides
+/// (homograph attack vector) and caps length. Labels come from
+/// `profiles.json`, which is user-writable — a misbehaving tool
+/// could inject newlines, ANSI-like sequences, or RTL overrides
+/// that mangle the menu rendering.
+fn sanitize_label(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                // Bidirectional overrides: LRO, RLO, LRE, RLE, PDF, LRI, RLI, FSI, PDI
+                && !matches!(
+                    *c,
+                    '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(MAX_LABEL_LEN)
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".into()
+    } else {
+        cleaned
+    }
+}
 
-    // The desktop app has no CLAUDE_CONFIG_DIR of its own. We show
-    // an active checkmark only if the user has a session live in
-    // some config-* dir that matches one of the accounts. Best-
-    // effort — returns None if no active config can be determined.
-    let active = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .and_then(|p| markers::read_current_account(std::path::Path::new(&p)))
-        .map(|a| a.get());
-
-    (accounts, active)
+/// Returns every `config-*` directory under base_dir.
+///
+/// Unlike `fanout::scan_config_dirs` which filters by the marker
+/// account, this returns ALL live config dirs regardless of which
+/// account they currently hold. Used by the tray quick-swap to
+/// retarget every live session to a single account.
+fn list_all_config_dirs(base: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return dirs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with("config-") {
+            dirs.push(path);
+        }
+    }
+    dirs
 }
 
 /// Builds the tray menu from the current account list.
 ///
 /// Menu layout:
-///   * #{id} {label}  ← one row per account, checkmark on active
+///   #{id} {label}  ← one row per account (no active checkmark —
+///                    see note below)
 ///   ---
 ///   Open Dashboard
 ///   Hide Dashboard
 ///   ---
 ///   Quit Claude Squad
+///
+/// No checkmark is shown for an "active" account because the
+/// desktop app has no single active session — each live config-*
+/// dir has its own active account, and `CLAUDE_CONFIG_DIR` is not
+/// set in a GUI-launched Tauri process, so there is no unambiguous
+/// signal to choose. The tray action is a "quick-swap" that
+/// retargets *all* live config dirs to the clicked account.
 fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
 
     if let Some(base) = base_dir() {
         if base.is_dir() {
-            let (accounts, active) = discover_for_tray(&base);
+            let accounts = discovery::discover_anthropic(&base);
+            let mut had_any = false;
             for a in &accounts {
                 if !a.has_credentials {
                     continue;
                 }
-                let marker = if Some(a.id) == active { "● " } else { "  " };
-                let label = format!("{}#{} {}", marker, a.id, a.label);
+                had_any = true;
+                let label = format!("#{} {}", a.id, sanitize_label(&a.label));
                 let id = format!("acct:{}", a.id);
                 let item = MenuItemBuilder::with_id(id, label).build(app)?;
                 builder = builder.item(&item);
             }
-            if !accounts.is_empty() {
+            if had_any {
                 builder = builder.item(&PredefinedMenuItem::separator(app)?);
             }
         }
@@ -83,12 +127,41 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .build()
 }
 
+/// Performs the blocking swap work for a tray `acct:{id}` click.
+///
+/// Enumerates every live config-* dir and retargets each to the
+/// clicked account. Runs on a tokio `spawn_blocking` worker — must
+/// not be invoked from the Tauri main thread.
+fn perform_tray_swap(base: &Path, account: AccountNum) -> (usize, usize) {
+    let config_dirs = list_all_config_dirs(base);
+    let mut ok = 0usize;
+    let mut err = 0usize;
+    for cd in &config_dirs {
+        match rotation::swap_to(base, cd, account) {
+            Ok(res) => {
+                log::info!("tray swap ok: account {} -> {}", res.account, cd.display());
+                ok += 1;
+            }
+            Err(e) => {
+                log::warn!(
+                    "tray swap failed: account {} -> {}: {}",
+                    account,
+                    cd.display(),
+                    e
+                );
+                err += 1;
+            }
+        }
+    }
+    (ok, err)
+}
+
 /// Handles a tray menu click.
 ///
-/// Account rows carry an `acct:{id}` identifier — on click we run
-/// `rotation::swap_to` for that account in every live config dir.
-/// Fire-and-forget: errors are logged but not surfaced to the user
-/// (the tray menu will refresh and show the new active account).
+/// Account rows dispatch the swap work to a `spawn_blocking` worker
+/// so the Tauri main thread (UI, tray rendering) stays responsive.
+/// Also refreshes the menu immediately after the swap completes so
+/// any label changes show without waiting for the next 30s tick.
 fn handle_tray_event(app: &AppHandle, id: &str) {
     match id {
         "open" => {
@@ -106,18 +179,31 @@ fn handle_tray_event(app: &AppHandle, id: &str) {
             app.exit(0);
         }
         s if s.starts_with("acct:") => {
-            if let Some(num_str) = s.strip_prefix("acct:") {
-                if let Ok(n) = num_str.parse::<u16>() {
-                    if let Ok(account) = AccountNum::try_from(n) {
-                        if let Some(base) = base_dir() {
-                            let config_dirs = fanout::scan_config_dirs(&base, account);
-                            for config_dir in &config_dirs {
-                                let _ = rotation::swap_to(&base, config_dir, account);
-                            }
-                        }
-                    }
-                }
-            }
+            let Some(num_str) = s.strip_prefix("acct:") else {
+                return;
+            };
+            let Ok(n) = num_str.parse::<u16>() else {
+                return;
+            };
+            let Ok(account) = AccountNum::try_from(n) else {
+                return;
+            };
+            let Some(base) = base_dir() else { return };
+
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let (ok, err) = perform_tray_swap(&base, account);
+                // Notify the frontend — a listener in the dashboard
+                // can show a toast / refresh data.
+                let _ = app_handle.emit(
+                    "tray-swap-complete",
+                    serde_json::json!({
+                        "account": account.get(),
+                        "ok": ok,
+                        "err": err,
+                    }),
+                );
+            });
         }
         _ => {}
     }
@@ -173,12 +259,18 @@ pub fn run() {
 
             // Refresh the tray menu every 30s so account changes
             // made from the CLI show up without restarting the app.
+            //
+            // `MissedTickBehavior::Skip` prevents the ticker from
+            // firing N catch-up ticks when the process wakes from
+            // laptop sleep — we only ever want the next scheduled
+            // tick after a gap, not a burst of 20 catch-ups.
             let app_handle = app.handle().clone();
             let tray_handle = tray.clone();
             tauri::async_runtime::spawn(async move {
                 let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 // First tick fires immediately; skip it since we
-                // just built the menu above.
+                // just built the menu synchronously above.
                 ticker.tick().await;
                 loop {
                     ticker.tick().await;
