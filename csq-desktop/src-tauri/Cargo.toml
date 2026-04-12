@@ -3,7 +3,7 @@ name = "csq-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Claude Squad desktop app — multi-account quota monitoring and rotation"
+description = "Code Session Quota (csq) desktop app — multi-account quota monitoring and rotation"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

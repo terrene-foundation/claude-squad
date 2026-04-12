@@ -217,7 +217,7 @@ Hooks MUST NOT attempt to understand code meaning via regex. Hooks check structu
 
 ### 5. Artifacts Match the Project's Actual Scope
 
-Every agent, skill, rule, and command in `.claude/` MUST be relevant to the work this project actually does. claude-squad is a small Python/bash OAuth rotation tool — it has no frontend, no SDK to build, no domain framework, no enterprise governance. Importing artifacts from upstream templates is fine; keeping ones that don't apply is bloat.
+Every agent, skill, rule, and command in `.claude/` MUST be relevant to the work this project actually does. csq is a Rust/Svelte desktop app and CLI for multi-account Claude Code session management. Importing artifacts from upstream templates is fine; keeping ones that don't apply is bloat.
 
 ```
 # DO: A csq agent that handles credential atomic-write patterns

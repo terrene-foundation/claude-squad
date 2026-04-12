@@ -87,6 +87,24 @@
 
 
 
+  // ── Sort mode ────────────────────────────────────────────
+  type SessionSortMode = 'custom' | 'title' | 'account';
+
+  function loadSessionSortMode(): SessionSortMode {
+    try {
+      const raw = localStorage.getItem('csq-session-sort');
+      if (raw === 'title' || raw === 'account') return raw;
+    } catch {}
+    return 'custom';
+  }
+
+  let sessionSortMode = $state<SessionSortMode>(loadSessionSortMode());
+
+  function setSessionSortMode(mode: SessionSortMode) {
+    sessionSortMode = mode;
+    try { localStorage.setItem('csq-session-sort', mode); } catch {}
+  }
+
   function orderedSessions(): SessionView[] {
     if (sessionOrder.length === 0) return sessions;
     const byPid = new Map(sessions.map(s => [s.pid, s]));
@@ -98,6 +116,23 @@
     for (const s of byPid.values()) ordered.push(s);
     return ordered;
   }
+
+  let displayedSessions = $derived.by(() => {
+    const base = orderedSessions();
+    if (sessionSortMode === 'custom') return base;
+    if (sessionSortMode === 'title') {
+      return [...base].sort((a, b) =>
+        getSessionTitle(a).localeCompare(getSessionTitle(b))
+      );
+    }
+    // account — sort by account number, nulls last
+    return [...base].sort((a, b) => {
+      if (a.account_id == null && b.account_id == null) return 0;
+      if (a.account_id == null) return 1;
+      if (b.account_id == null) return -1;
+      return a.account_id - b.account_id;
+    });
+  });
 
   let justMovedPid = $state<number | null>(null);
 
@@ -248,13 +283,32 @@
       </p>
     </div>
   {:else}
+    <div class="sort-control">
+      <button
+        class="sort-pill"
+        class:active={sessionSortMode === 'custom'}
+        onclick={() => setSessionSortMode('custom')}
+      >custom</button>
+      <button
+        class="sort-pill"
+        class:active={sessionSortMode === 'title'}
+        onclick={() => setSessionSortMode('title')}
+      >title</button>
+      <button
+        class="sort-pill"
+        class:active={sessionSortMode === 'account'}
+        onclick={() => setSessionSortMode('account')}
+      >account</button>
+    </div>
     <div class="session-list">
-      {#each orderedSessions() as session, idx (session.pid)}
+      {#each displayedSessions as session, idx (session.pid)}
         <div class="session-row" class:just-moved={justMovedPid === session.pid}>
+          {#if sessionSortMode === 'custom'}
           <div class="move-btns">
             <button class="move-btn" onclick={() => moveSession(idx, -1)} disabled={idx === 0}>▲</button>
-            <button class="move-btn" onclick={() => moveSession(idx, 1)} disabled={idx === orderedSessions().length - 1}>▼</button>
+            <button class="move-btn" onclick={() => moveSession(idx, 1)} disabled={idx === displayedSessions.length - 1}>▼</button>
           </div>
+          {/if}
           <div class="session-primary">
             <div class="session-title-row">
               {#if editingPid === session.pid}
@@ -271,6 +325,8 @@
               {:else}
                 <span
                   class="session-title"
+                  role="button"
+                  tabindex="0"
                   ondblclick={(e) => startNameEdit(session, e)}
                   title="Double-click to rename"
                 >{getSessionTitle(session)}</span>
@@ -337,6 +393,32 @@
 </div>
 
 <style>
+  .sort-control {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 0.5rem;
+  }
+  .sort-pill {
+    padding: 0.2rem 0.55rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-tertiary);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    line-height: 1.4;
+  }
+  .sort-pill:hover {
+    border-color: var(--text-secondary);
+    color: var(--text-secondary);
+  }
+  .sort-pill.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-low);
+  }
   .session-list-container {
     display: flex;
     flex-direction: column;

@@ -26,7 +26,7 @@ The Foundation is **Terrene Foundation** (Singapore CLG).
 
 The Foundation is a fully independent entity. There is NO structural relationship between the Foundation and any commercial entity.
 
-1. **claude-squad is Foundation-owned** (Apache 2.0) — not "contributed by" or "licensed from" any entity
+1. **csq is Foundation-owned** (Apache 2.0) — not "contributed by" or "licensed from" any entity
 2. **All open-source IP was fully and irrevocably transferred to the Foundation**
 3. **The constitution prevents open-washing, rent-seeking, and self-interest** by ANY contributor
 4. **Anyone can build commercial products on Foundation standards** — that is the intended model
@@ -37,7 +37,7 @@ See `rules/independence.md` for the full no-commercial-coupling policy.
 
 ### License Accuracy
 
-- claude-squad: **Apache 2.0** — Foundation-owned
+- csq: **Apache 2.0** — Foundation-owned
 - BSL 1.1 is **NOT** open source — use "source-available" or "open-core" if ever referenced
 - Foundation specifications (CARE, EATP, CO): **CC BY 4.0** — referenced for context only; not part of csq itself
 
