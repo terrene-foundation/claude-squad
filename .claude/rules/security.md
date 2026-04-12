@@ -5,7 +5,7 @@ description: Security rules — no hardcoded secrets, OAuth credential safety, k
 
 # Security Rules
 
-Applies to all code in claude-squad. The codebase is Rust (`csq-core/`, `csq-cli/`, `csq-desktop/`) with a legacy Python layer (`rotation-engine.py`, `csq`). OAuth credentials for multiple Claude Code accounts are the primary asset — a single mistake can burn refresh tokens, lock users out, or leak access tokens to other processes.
+Applies to all code in csq. The codebase is Rust (`csq-core/`, `csq-cli/`, `csq-desktop/`). OAuth credentials for multiple Claude Code accounts are the primary asset — a single mistake can burn refresh tokens, lock users out, or leak access tokens to other processes.
 
 ## MUST Rules
 

@@ -219,7 +219,7 @@ fn most_recent_config_dir(base: &Path) -> Option<PathBuf> {
 ///   Open Dashboard
 ///   Hide Dashboard
 ///   ---
-///   Quit Claude Squad
+///   Quit csq
 ///
 /// No checkmark is shown for an "active" account because the
 /// desktop app has no single active session — each live config-*
@@ -268,7 +268,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
     let open_dashboard = MenuItemBuilder::with_id("open", "Open Dashboard").build(app)?;
     let hide_dashboard = MenuItemBuilder::with_id("hide", "Hide Dashboard").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit Claude Squad").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit csq").build(app)?;
 
     builder
         .item(&open_dashboard)
@@ -332,26 +332,19 @@ impl TrayStatus {
     }
 
     /// Human-readable tooltip string shown when the user hovers the
-    /// tray icon. Tooltip format intentionally starts with
-    /// "Claude Squad" so the app is identifiable before the status
-    /// summary.
+    /// tray icon. Tooltip format intentionally starts with "csq" so
+    /// the app is identifiable before the status summary.
     fn tooltip(&self) -> String {
         match &self.health {
-            TrayHealth::Empty => "Claude Squad — no accounts configured".to_string(),
+            TrayHealth::Empty => "csq — no accounts configured".to_string(),
             TrayHealth::Healthy => {
-                format!("Claude Squad — {} account(s) healthy", self.total)
+                format!("csq — {} account(s) healthy", self.total)
             }
             TrayHealth::Expiring { count } => {
-                format!(
-                    "Claude Squad — {count} of {} account(s) token expiring",
-                    self.total
-                )
+                format!("csq — {count} of {} account(s) token expiring", self.total)
             }
             TrayHealth::OutOfQuota { count } => {
-                format!(
-                    "Claude Squad — {count} of {} account(s) out of 5h quota",
-                    self.total
-                )
+                format!("csq — {count} of {} account(s) out of 5h quota", self.total)
             }
         }
     }
@@ -793,14 +786,14 @@ pub fn run() {
             // app already shows live status (e.g. "7 accounts
             // healthy") and the menu bar already reflects whether
             // anything needs attention. Without this the tooltip
-            // would say "Claude Squad" and the icon would stay
-            // neutral until the 30s refresh ticker first fires.
+            // would say "csq" and the icon would stay neutral
+            // until the 30s refresh ticker first fires.
             let (initial_tooltip, initial_icon_kind) = match base_dir() {
                 Some(b) => {
                     let status = compute_tray_status(&b);
                     (status.tooltip(), status.icon_kind())
                 }
-                None => ("Claude Squad".to_string(), TrayIconKind::Normal),
+                None => ("csq".to_string(), TrayIconKind::Normal),
             };
             let initial_image = Image::from_bytes(initial_icon_kind.bytes())?;
             let menu = build_tray_menu(app.handle())?;

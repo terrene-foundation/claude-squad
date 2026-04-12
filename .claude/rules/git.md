@@ -5,7 +5,7 @@ description: Git workflow rules — conventional commits, atomic commits, branch
 
 # Git Workflow Rules
 
-Applies to all git operations in claude-squad.
+Applies to all git operations in csq.
 
 ## MUST Rules
 

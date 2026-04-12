@@ -7,13 +7,13 @@ description: Branch protection rules — no direct push to main, no force push, 
 
 ## Scope
 
-These rules apply to ALL git operations in the claude-squad repository.
+These rules apply to ALL git operations in the csq repository.
 
 ## Protected Repositories
 
-| Repository                        | Branch | Protection Level    |
-| --------------------------------- | ------ | ------------------- |
-| `terrene-foundation/claude-squad` | `main` | Full (admin bypass) |
+| Repository               | Branch | Protection Level    |
+| ------------------------ | ------ | ------------------- |
+| `terrene-foundation/csq` | `main` | Full (admin bypass) |
 
 ## Protection Settings
 

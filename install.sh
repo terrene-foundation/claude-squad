@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claude Squad installer — multi-account rotation for Claude Code
+# Code Session Quota (csq) installer — multi-account rotation for Claude Code
 # macOS / Linux / WSL / Git Bash on Windows
-# Install: curl -sSL https://raw.githubusercontent.com/terrene-foundation/claude-squad/main/install.sh | bash
+# Install: curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
 
-REPO_URL="https://raw.githubusercontent.com/terrene-foundation/claude-squad/main"
+REPO_URL="https://raw.githubusercontent.com/terrene-foundation/csq/main"
 ACCOUNTS_DIR="$HOME/.claude/accounts"
 if [[ -d "$HOME/bin" ]] && echo "$PATH" | grep -q "$HOME/bin"; then
     BIN_DIR="$HOME/bin"

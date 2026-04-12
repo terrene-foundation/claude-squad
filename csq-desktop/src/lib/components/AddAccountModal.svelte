@@ -430,19 +430,7 @@
     color: #4caf50;
     font-size: 0.9rem;
   }
-  .fallback {
-    margin: 0.5rem 0;
-    font-size: 0.85rem;
-  }
-  .fallback summary {
-    cursor: pointer;
-    color: var(--text-secondary);
-    padding: 0.25rem 0;
-    user-select: none;
-  }
-  .fallback summary:hover {
-    color: var(--text-primary);
-  }
+
   .url-box {
     width: 100%;
     padding: 0.5rem;

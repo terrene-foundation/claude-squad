@@ -144,20 +144,25 @@
   // for a given window. The badge appears on the one account whose
   // reset time is smallest (i.e. the soonest to free up quota).
 
-  let soonest5hId = $derived.by(() => {
-    const candidates = accounts.filter(a => a.five_hour_resets_in != null && a.five_hour_resets_in > 0);
-    if (candidates.length < 2) return null;
-    return candidates.reduce((best, a) =>
-      a.five_hour_resets_in! < best.five_hour_resets_in! ? a : best
-    ).id;
-  });
-
-  let soonest7dId = $derived.by(() => {
-    const candidates = accounts.filter(a => a.seven_day_resets_in != null && a.seven_day_resets_in > 0);
-    if (candidates.length < 2) return null;
-    return candidates.reduce((best, a) =>
-      a.seven_day_resets_in! < best.seven_day_resets_in! ? a : best
-    ).id;
+  // ── 7d reset ranking ─────────────────────────────────────
+  //
+  // Rank accounts by 7d reset time (soonest = 1st). Accounts
+  // with >= 99.5% usage are excluded — they have no usable quota
+  // until reset. Same-rank ties are allowed when reset times match.
+  let resetRank = $derived.by((): Map<number, number> => {
+    const ranked = new Map<number, number>();
+    const candidates = accounts
+      .filter(a => a.seven_day_resets_in != null && a.seven_day_resets_in > 0 && a.seven_day_pct < 99.5)
+      .sort((a, b) => a.seven_day_resets_in! - b.seven_day_resets_in!);
+    if (candidates.length < 2) return ranked;
+    let rank = 1;
+    for (let i = 0; i < candidates.length; i++) {
+      if (i > 0 && candidates[i].seven_day_resets_in !== candidates[i - 1].seven_day_resets_in) {
+        rank = i + 1;
+      }
+      ranked.set(candidates[i].id, rank);
+    }
+    return ranked;
   });
 
   // ── First-paint instrumentation ──────────────────────────
@@ -325,7 +330,7 @@
                 onclick={(e) => e.stopPropagation()}
               />
             {:else}
-              <span class="account-label" ondblclick={(e) => startRename(account, e)} title="Double-click to rename">{account.label}</span>
+              <span class="account-label" role="button" tabindex="0" ondblclick={(e) => startRename(account, e)} title="Double-click to rename">{account.label}</span>
             {/if}
             <TokenBadge status={account.token_status} expiresSecs={account.expires_in_secs} />
           </div>
@@ -341,18 +346,13 @@
           {#if account.five_hour_resets_in || account.seven_day_resets_in}
             <div class="reset-info">
               {#if account.five_hour_resets_in}
-                <span>
-                  5h resets in {formatResetTime(account.five_hour_resets_in)}
-                  {#if soonest5hId === account.id}
-                    <span class="next-badge">next</span>
-                  {/if}
-                </span>
+                <span>5h resets in {formatResetTime(account.five_hour_resets_in)}</span>
               {/if}
               {#if account.seven_day_resets_in}
                 <span>
                   7d resets in {formatResetTime(account.seven_day_resets_in)}
-                  {#if soonest7dId === account.id}
-                    <span class="next-badge">next</span>
+                  {#if resetRank.has(account.id)}
+                    <span class="rank-badge">{resetRank.get(account.id)}</span>
                   {/if}
                 </span>
               {/if}
@@ -415,15 +415,17 @@
     color: var(--accent);
     background: var(--accent-low);
   }
-  .next-badge {
-    display: inline-block;
-    font-size: 0.6rem;
-    font-weight: 600;
-    letter-spacing: 0.03em;
+  .rank-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.58rem;
+    font-weight: 700;
+    min-width: 1.2em;
     color: var(--accent);
     border: 1px solid var(--accent);
     border-radius: 999px;
-    padding: 0 0.32em;
+    padding: 0 0.3em;
     line-height: 1.5;
     vertical-align: middle;
     margin-left: 0.25em;

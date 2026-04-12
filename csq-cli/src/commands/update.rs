@@ -14,7 +14,7 @@
 //!
 //! ### Flow
 //!
-//! 1. Fetch `GET https://api.github.com/repos/terrene-foundation/claude-squad/releases/latest`
+//! 1. Fetch `GET https://api.github.com/repos/terrene-foundation/csq/releases/latest`
 //! 2. Parse the JSON for `tag_name` and `html_url`.
 //! 3. Compare `tag_name` (minus any leading `v`) to
 //!    `env!("CARGO_PKG_VERSION")`.
@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 const GITHUB_API_LATEST: &str =
-    "https://api.github.com/repos/terrene-foundation/claude-squad/releases/latest";
+    "https://api.github.com/repos/terrene-foundation/csq/releases/latest";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Subset of the GitHub Releases API response we care about.
