@@ -2,7 +2,13 @@
 
 **Date:** 2026-04-12
 **Type:** DECISION + DISCOVERY
-**Status:** Implemented
+**Status:** Partially RETRACTED — see journal 0031 and `specs/02-csq-handle-dir-model.md` section 2.7.
+
+> ⚠ **Finding 4 is RETRACTED.** The claim that "CC caches credentials in memory at startup" was disproved on 2026-04-12 by direct read of Claude Code source. See `src/utils/auth.ts:1313-1336` (`invalidateOAuthCacheIfDiskChanged`), `auth.ts:1453` (called from `checkAndRefreshOAuthTokenIfNeededImpl`), and `services/api/client.ts:132` (called before every API client construction). CC does a cross-process file mtime check on `.credentials.json` before every API call and clears its OAuth cache when the mtime changes. This is a designed feature added to fix CC-1096 / GH#24317. The `needs_restart` field and badge implemented on the basis of Finding 4 MUST be deleted.
+>
+> Findings 1, 2, 3 remain valid but are superseded by the handle-dir model: physical/logical identity divergence is eliminated by making `config-N` permanent and `term-<pid>` ephemeral (spec 02). Subscription contamination guards collapse to one site (the daemon refresh write path) because csq swap no longer writes credentials at all.
+>
+> Authoritative specs: `specs/01-cc-credential-architecture.md`, `specs/02-csq-handle-dir-model.md`. Retraction journal: `0031-DECISION-retract-stale-session-detection-handle-dir-model.md`.
 
 ## Context
 
@@ -13,6 +19,7 @@ During live debugging of swap/rename behavior across 8 accounts and 10 config di
 **Root cause:** Code used `config-N` directory suffix as account identity. After any swap or rename, slot number and account number diverge permanently.
 
 **Affected code:**
+
 - `commands.rs:292` — `SessionView.account_id` used dir number instead of `.csq-account` marker
 - `commands.rs:382` — `swap_session` 3P source check validated against dir number, not marker
 

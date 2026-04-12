@@ -45,3 +45,4 @@ workspaces/**/.session-notes
 
 # COC eval environment (large, local-only)
 coc-eval/
+.playwright-mcp/
