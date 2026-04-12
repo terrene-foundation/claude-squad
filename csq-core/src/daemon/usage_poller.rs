@@ -704,11 +704,12 @@ pub(crate) async fn tick_3p(
             None
         };
 
-        // MiniMax returns a richer structure (both 5h and 7d windows),
-        // so it gets its own result type. Other providers use RateLimitData.
+        // MiniMax and Z.AI return richer structures (both 5h and 7d),
+        // so they get their own result types. Others use RateLimitData.
         enum PollResult3P {
             RateLimits(RateLimitData),
             MiniMax(MiniMaxQuota),
+            Zai(ZaiQuota),
         }
 
         let join_handle = tokio::task::spawn_blocking(move || {
@@ -716,9 +717,7 @@ pub(crate) async fn tick_3p(
                 poll_minimax_quota(&raw_key, group_id.as_deref(), &model, &http_get)
                     .map(PollResult3P::MiniMax)
             } else if pid == "zai" {
-                Err(PollError::Parse(
-                    "Z.AI quota requires JWT session token — view usage at z.ai".into(),
-                ))
+                poll_zai_quota(&raw_key, &http_get).map(PollResult3P::Zai)
             } else {
                 poll_3p_usage(&url, &raw_key, &model, &http_probe).map(PollResult3P::RateLimits)
             }
@@ -740,6 +739,16 @@ pub(crate) async fn tick_3p(
                         account = info.id,
                         "3P poller: failed to write MiniMax quota"
                     );
+                    let _ = e;
+                }
+                clear_cooldown(cooldowns, info.id);
+                clear_backoff(backoffs, info.id);
+                polled += 1;
+            }
+            Ok(Ok(PollResult3P::Zai(zai_quota))) => {
+                let base = base_dir.to_path_buf();
+                if let Err(e) = write_zai_quota(&base, info.id, &zai_quota) {
+                    warn!(account = info.id, "3P poller: failed to write Z.AI quota");
                     let _ = e;
                 }
                 clear_cooldown(cooldowns, info.id);
@@ -1069,6 +1078,113 @@ pub(crate) fn extract_rate_limit_headers(headers: &HashMap<String, String>) -> R
         input_tokens_limit: get_u64("input-tokens-limit"),
         output_tokens_limit: get_u64("output-tokens-limit"),
     }
+}
+
+/// Z.AI quota data parsed from `/api/monitor/usage/quota/limit`.
+///
+/// Same shape as MiniMax: both 5h and 7d windows.
+#[derive(Debug, Clone)]
+pub(crate) struct ZaiQuota {
+    pub five_hour: Option<UsageWindow>,
+    pub seven_day: Option<UsageWindow>,
+}
+
+/// Polls Z.AI's quota API for authoritative usage data.
+///
+/// Endpoint: `GET https://api.z.ai/api/monitor/usage/quota/limit`
+/// Auth: `Authorization: Bearer <API_KEY>` (same key used for messages)
+///
+/// Response shape (live-verified 2026-04-12):
+/// ```json
+/// { "code": 200, "data": { "limits": [
+///   { "type": "TOKENS_LIMIT", "unit": 3, "percentage": 6, "nextResetTime": 1776025018977 },
+///   { "type": "TOKENS_LIMIT", "unit": 6, "percentage": 11, "nextResetTime": 1776389633997 }
+/// ], "level": "max" } }
+/// ```
+///
+/// Unit mapping: 3 = 5-hour, 6 = 7-day. `percentage` is already 0-100.
+pub(crate) fn poll_zai_quota(api_key: &str, http_get: &HttpGetFn) -> Result<ZaiQuota, PollError> {
+    let url = "https://api.z.ai/api/monitor/usage/quota/limit";
+    let extra_headers = [("Accept", "application/json")];
+
+    let (status, body) = http_get(url, api_key, &extra_headers).map_err(PollError::Transport)?;
+
+    match status {
+        429 => return Err(PollError::RateLimited),
+        401 => return Err(PollError::Unauthorized),
+        200 => {}
+        other => return Err(PollError::HttpError(other)),
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| PollError::Parse(e.to_string()))?;
+
+    let limits = json
+        .get("data")
+        .and_then(|d| d.get("limits"))
+        .and_then(|l| l.as_array())
+        .ok_or_else(|| PollError::Parse("missing data.limits array".into()))?;
+
+    let mut five_hour = None;
+    let mut seven_day = None;
+
+    for lim in limits {
+        let lim_type = lim.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let unit = lim.get("unit").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pct = lim.get("percentage").and_then(|v| v.as_f64());
+        let reset_ms = lim.get("nextResetTime").and_then(|v| v.as_u64());
+
+        if lim_type != "TOKENS_LIMIT" {
+            continue;
+        }
+
+        if let (Some(pct), Some(reset_ms)) = (pct, reset_ms) {
+            let window = UsageWindow {
+                used_percentage: pct,
+                resets_at: reset_ms / 1000, // ms → epoch seconds
+            };
+            match unit {
+                3 => five_hour = Some(window), // unit 3 = 5-hour
+                6 => seven_day = Some(window), // unit 6 = 7-day
+                _ => {}
+            }
+        }
+    }
+
+    Ok(ZaiQuota {
+        five_hour,
+        seven_day,
+    })
+}
+
+/// Writes Z.AI quota data (both 5h and 7d windows) into `quota.json`.
+fn write_zai_quota(
+    base_dir: &std::path::Path,
+    account_id: u16,
+    zai: &ZaiQuota,
+) -> Result<(), crate::error::CsqError> {
+    let lock_path = quota_state::quota_path(base_dir).with_extension("lock");
+    let _guard = crate::platform::lock::lock_file(&lock_path)?;
+    let mut quota = quota_state::load_state(base_dir).unwrap_or_else(|_| QuotaFile::empty());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
+    quota.set(
+        account_id,
+        AccountQuota {
+            five_hour: zai.five_hour.clone(),
+            seven_day: zai.seven_day.clone(),
+            rate_limits: None,
+            updated_at: now,
+        },
+    );
+
+    quota_state::save_state(base_dir, &quota)?;
+    debug!(account = account_id, "Z.AI poller: quota file updated");
+    Ok(())
 }
 
 /// Writes MiniMax quota data (both 5h and 7d windows) into `quota.json`.
@@ -1770,10 +1886,29 @@ mod tests {
 
     // ─── tick_3p integration tests ──────────────────────────
 
+    /// Mock HttpGetFn that returns a Z.AI quota response.
+    fn mock_zai_get() -> HttpGetFn {
+        Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":1776025018977},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":1776389633997}],"level":"max"}}"#.to_vec()))
+        })
+    }
+
+    /// HttpGetFn that routes MiniMax and Z.AI to the right mock.
+    fn mock_get_combined() -> HttpGetFn {
+        Arc::new(|url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            if url.contains("z.ai") {
+                // Z.AI quota response
+                Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":1776025018977},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":1776389633997}],"level":"max"}}"#.to_vec()))
+            } else {
+                // MiniMax quota response
+                Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#.to_vec()))
+            }
+        })
+    }
+
     #[tokio::test]
-    async fn tick_3p_zai_skips_probe_enters_cooldown() {
-        // Z.AI now requires JWT auth — the poller skips the probe
-        // and enters cooldown with a Parse error (issue #78).
+    async fn tick_3p_zai_polls_and_writes_quota() {
+        // Z.AI now uses direct quota API (live-verified: API key works)
         let dir = TempDir::new().unwrap();
         install_3p_account(dir.path(), "zai", "test-api-key");
 
@@ -1782,12 +1917,20 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
+        tick_3p(dir.path(), &mock_zai_get(), &http, &cooldowns, &backoffs).await;
 
-        // Z.AI no longer calls the POST probe — it returns an error
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "Z.AI should skip probe");
-        // Should be in cooldown due to the Parse error
-        assert!(in_cooldown(&cooldowns, 901));
+        // Z.AI uses GET, not POST probe
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "Z.AI should use GET, not POST"
+        );
+
+        // Verify quota was written
+        let quota = quota_state::load_state(dir.path()).unwrap();
+        let q = quota.get(901).expect("Z.AI account 901 should have quota");
+        assert!((q.five_hour_pct() - 6.0).abs() < 0.01);
+        assert!((q.seven_day_pct() - 11.0).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -1839,11 +1982,10 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        // MiniMax uses direct GET endpoint (mock_get_noop),
-        // Z.AI now skips probe entirely (issue #78 — needs JWT)
+        // Both MiniMax and Z.AI use direct GET endpoints now
         tick_3p(
             dir.path(),
-            &mock_get_noop(),
+            &mock_get_combined(),
             &http_post,
             &cooldowns,
             &backoffs,
@@ -1852,16 +1994,14 @@ mod tests {
         assert_eq!(
             post_counter.load(Ordering::SeqCst),
             0,
-            "Z.AI skips probe, MiniMax uses GET — no POST calls"
+            "Both use GET, no POST probe calls"
         );
 
         let quota = quota_state::load_state(dir.path()).unwrap();
-        // Z.AI enters cooldown (no quota written — needs JWT)
-        assert!(in_cooldown(&cooldowns, 901), "Z.AI should be in cooldown");
-        // MiniMax should have quota via GET (GroupId configured above)
+        assert!(quota.get(901).is_some(), "Z.AI should have quota (via GET)");
         assert!(
             quota.get(902).is_some(),
-            "MiniMax should have quota (via GET with GroupId)"
+            "MiniMax should have quota (via GET)"
         );
     }
 
@@ -2099,5 +2239,50 @@ mod tests {
         // Falls back to first entry: used = 5000-4900 = 100 → 2%
         let fh = mm.five_hour.unwrap();
         assert!((fh.used_percentage - 2.0).abs() < 0.01);
+    }
+
+    // ─── poll_zai_quota tests ─────────────────────────────────
+
+    fn mock_zai_get_static(response: &'static str) -> HttpGetFn {
+        Arc::new(move |_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            Ok((200, response.as_bytes().to_vec()))
+        })
+    }
+
+    #[test]
+    fn poll_zai_parses_both_windows() {
+        let response = r#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":1776025018977},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":1776389633997}],"level":"max"}}"#;
+        let http = mock_zai_get_static(response);
+        let result = poll_zai_quota("key", &http);
+        assert!(result.is_ok());
+        let zai = result.unwrap();
+
+        let fh = zai.five_hour.unwrap();
+        assert!((fh.used_percentage - 6.0).abs() < 0.01);
+        assert_eq!(fh.resets_at, 1776025018); // ms → s
+
+        let sd = zai.seven_day.unwrap();
+        assert!((sd.used_percentage - 11.0).abs() < 0.01);
+        assert_eq!(sd.resets_at, 1776389633);
+    }
+
+    #[test]
+    fn poll_zai_ignores_non_token_limits() {
+        // TIME_LIMIT entries should be skipped
+        let response = r#"{"code":200,"data":{"limits":[{"type":"TIME_LIMIT","unit":5,"percentage":6,"nextResetTime":1776000000000},{"type":"TOKENS_LIMIT","unit":3,"percentage":42,"nextResetTime":1776025018977}],"level":"max"}}"#;
+        let http = mock_zai_get_static(response);
+        let result = poll_zai_quota("key", &http).unwrap();
+        assert!(result.five_hour.is_some());
+        assert!((result.five_hour.unwrap().used_percentage - 42.0).abs() < 0.01);
+        assert!(result.seven_day.is_none()); // no unit=6 entry
+    }
+
+    #[test]
+    fn poll_zai_401_returns_unauthorized() {
+        let http: HttpGetFn = Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            Ok((401, b"unauthorized".to_vec()))
+        });
+        let result = poll_zai_quota("bad-key", &http);
+        assert!(matches!(result, Err(PollError::Unauthorized)));
     }
 }
