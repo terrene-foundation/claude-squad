@@ -15,6 +15,7 @@
     account_id: number | null;
     account_label: string | null;
     five_hour_pct: number;
+    seven_day_pct: number;
     started_at: number | null;
     tty: string | null;
     term_window: number | null;
@@ -22,6 +23,7 @@
     term_pane: number | null;
     iterm_profile: string | null;
     terminal_title: string | null;
+    needs_restart: boolean;
   }
 
   interface AccountView {
@@ -35,8 +37,81 @@
   let accounts = $state<AccountView[]>([]);
   let error = $state<string | null>(null);
   let loading = $state(true);
-  /// PID the user has opened a swap dropdown for (only one at a time).
   let pickerPid = $state<number | null>(null);
+  let pickerDropup = $state(false);
+  let sessionOrder = $state<number[]>([]);
+
+  // ── Session nicknames (user-editable titles) ────────────
+  let sessionNames = $state<Record<string, string>>({});
+  let editingPid = $state<number | null>(null);
+  let editNameValue = $state('');
+
+  function loadSessionNames(): Record<string, string> {
+    try {
+      const raw = localStorage.getItem('csq-session-names');
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+  function saveSessionNames() {
+    try { localStorage.setItem('csq-session-names', JSON.stringify(sessionNames)); } catch {}
+  }
+  function sessionKey(session: SessionView): string {
+    return `${session.config_dir}::${session.cwd}`;
+  }
+  function getSessionTitle(session: SessionView): string {
+    const nickname = sessionNames[sessionKey(session)];
+    if (nickname) return nickname;
+    if (session.terminal_title && session.terminal_title !== 'Claude Code') return session.terminal_title;
+    // Extract just the project folder name from the path
+    const parts = session.cwd.split('/');
+    return parts[parts.length - 1] || formatCwd(session.cwd);
+  }
+  function startNameEdit(session: SessionView, e: MouseEvent) {
+    e.stopPropagation();
+    editingPid = session.pid;
+    editNameValue = sessionNames[sessionKey(session)] || '';
+  }
+  function saveNameEdit(session: SessionView) {
+    if (editNameValue.trim()) {
+      sessionNames[sessionKey(session)] = editNameValue.trim();
+    } else {
+      delete sessionNames[sessionKey(session)];
+    }
+    saveSessionNames();
+    editingPid = null;
+  }
+  function handleNameKeydown(e: KeyboardEvent, session: SessionView) {
+    if (e.key === 'Enter') saveNameEdit(session);
+    if (e.key === 'Escape') editingPid = null;
+  }
+
+
+
+  function orderedSessions(): SessionView[] {
+    if (sessionOrder.length === 0) return sessions;
+    const byPid = new Map(sessions.map(s => [s.pid, s]));
+    const ordered: SessionView[] = [];
+    for (const pid of sessionOrder) {
+      const s = byPid.get(pid);
+      if (s) { ordered.push(s); byPid.delete(pid); }
+    }
+    for (const s of byPid.values()) ordered.push(s);
+    return ordered;
+  }
+
+  let justMovedPid = $state<number | null>(null);
+
+  function moveSession(idx: number, direction: -1 | 1) {
+    const items = [...orderedSessions()];
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= items.length) return;
+    const movedPid = items[idx].pid;
+    [items[idx], items[newIdx]] = [items[newIdx], items[idx]];
+    sessionOrder = items.map(s => s.pid);
+    try { localStorage.setItem('csq-session-order', JSON.stringify(sessionOrder)); } catch {}
+    justMovedPid = movedPid;
+    setTimeout(() => { justMovedPid = null; }, 600);
+  }
 
   async function getBaseDir(): Promise<string> {
     // `join` honors the platform path separator and Tauri 2.10's
@@ -73,7 +148,7 @@
       });
       showToast(
         "success",
-        `PID ${session.pid}: ${msg}`,
+        `PID ${session.pid}: ${msg}. Run /exit in the terminal to apply.`,
       );
       // Poke the account list and session list to reflect the new
       // binding immediately instead of waiting for the next poll.
@@ -107,7 +182,7 @@
   }
 
   function formatAge(startedAt: number | null): string {
-    if (startedAt == null) return "—";
+    if (startedAt == null) return "";
     const nowSecs = Math.floor(Date.now() / 1000);
     const age = Math.max(0, nowSecs - startedAt);
     if (age < 60) return `${age}s`;
@@ -149,6 +224,11 @@
 
   // Poll every 5s so rotation / new terminals show up quickly.
   $effect(() => {
+    try {
+      const raw = localStorage.getItem('csq-session-order');
+      sessionOrder = raw ? JSON.parse(raw) : [];
+    } catch { sessionOrder = []; }
+    sessionNames = loadSessionNames();
     fetchSessions();
     const interval = setInterval(fetchSessions, 5000);
     return () => clearInterval(interval);
@@ -169,46 +249,75 @@
     </div>
   {:else}
     <div class="session-list">
-      {#each sessions as session (session.pid)}
-        <div class="session-row">
-          <div class="session-primary">
-            <span class="pid" title="Process ID">PID {session.pid}</span>
-            <span class="cwd" title={session.cwd}>{formatCwd(session.cwd)}</span>
-            <span
-              class="terminal"
-              title={session.tty
-                ? `TTY ${session.tty} · ${session.terminal_title ?? "iTerm tab title unavailable"}`
-                : "No TTY detected"}
-            >
-              {formatTerminal(session)}{formatPaneSuffix(session)}
-            </span>
+      {#each orderedSessions() as session, idx (session.pid)}
+        <div class="session-row" class:just-moved={justMovedPid === session.pid}>
+          <div class="move-btns">
+            <button class="move-btn" onclick={() => moveSession(idx, -1)} disabled={idx === 0}>▲</button>
+            <button class="move-btn" onclick={() => moveSession(idx, 1)} disabled={idx === orderedSessions().length - 1}>▼</button>
           </div>
-          <div class="session-meta">
-            <span class="config-dir">{formatConfigDir(session.config_dir)}</span>
-            {#if session.account_id !== null}
-              <span class="account">
-                #{session.account_id}
-                {#if session.account_label}
-                  <span class="account-label">{session.account_label}</span>
-                {/if}
+          <div class="session-primary">
+            <div class="session-title-row">
+              {#if editingPid === session.pid}
+                <!-- svelte-ignore a11y_autofocus -->
+                <input
+                  class="rename-input"
+                  bind:value={editNameValue}
+                  onkeydown={(e) => handleNameKeydown(e, session)}
+                  onblur={() => saveNameEdit(session)}
+                  autofocus
+                  placeholder="Session name..."
+                  onclick={(e) => e.stopPropagation()}
+                />
+              {:else}
+                <span
+                  class="session-title"
+                  ondblclick={(e) => startNameEdit(session, e)}
+                  title="Double-click to rename"
+                >{getSessionTitle(session)}</span>
+              {/if}
+              <span class="age" title="Session age">{formatAge(session.started_at)}</span>
+            </div>
+            <span class="session-path" title={session.cwd}>{formatCwd(session.cwd)}</span>
+            <div class="session-meta-row">
+              {#if session.account_id !== null}
+                <span class="account-badge">
+                  #{session.account_id}
+                  {#if session.account_label}
+                    {session.account_label}
+                  {/if}
+                </span>
+              {/if}
+              {#if session.needs_restart}
+                <span class="restart-badge" title="Credentials were swapped after this session started. Restart claude to use the new account.">restart needed</span>
+              {/if}
+              <span class="quota-badge {quotaClass(session.five_hour_pct)}">
+                5h:{Math.round(session.five_hour_pct)}%
               </span>
-            {/if}
-            <span class="quota {quotaClass(session.five_hour_pct)}">
-              5h: {Math.round(session.five_hour_pct)}%
-            </span>
-            <span class="age" title="Session age">{formatAge(session.started_at)}</span>
+              <span class="quota-badge {quotaClass(session.seven_day_pct)}">
+                7d:{Math.round(session.seven_day_pct)}%
+              </span>
+            </div>
           </div>
           <div class="session-actions">
             <button
               class="swap-btn"
-              onclick={() =>
-                (pickerPid = pickerPid === session.pid ? null : session.pid)}
+              onclick={(e) => {
+                if (pickerPid === session.pid) {
+                  pickerPid = null;
+                } else {
+                  const btn = e.currentTarget as HTMLElement;
+                  const rect = btn.getBoundingClientRect();
+                  const spaceBelow = window.innerHeight - rect.bottom;
+                  pickerDropup = spaceBelow < 260;
+                  pickerPid = session.pid;
+                }
+              }}
               aria-label="Swap this session to another account"
             >
-              Swap ▾
+              Swap {pickerPid === session.pid && pickerDropup ? '▴' : '▾'}
             </button>
             {#if pickerPid === session.pid}
-              <div class="picker" role="menu">
+              <div class="picker" class:dropup={pickerDropup} role="menu">
                 {#each accounts as account (account.id)}
                   <button
                     class="picker-item"
@@ -233,69 +342,116 @@
     flex-direction: column;
     gap: 0.5rem;
   }
+  .session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
   .session-row {
     position: relative;
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.6rem 0.75rem;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.6rem 0.75rem 0.6rem 0.5rem;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 0.85rem;
+    transition: border-color 0.15s;
   }
+  .session-row:hover { border-color: var(--accent); }
+  .session-row.just-moved { border-color: var(--accent); transition: border-color 0.3s; }
+  .move-btns {
+    position: absolute;
+    right: 0.4rem;
+    bottom: 0.4rem;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 2;
+  }
+  .session-row:hover .move-btns { opacity: 1; }
+  .move-btn {
+    background: var(--bg-tertiary);
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.55rem;
+    padding: 0.15rem 0.25rem;
+    cursor: pointer;
+    border-radius: 2px;
+    line-height: 1;
+  }
+  .move-btn:hover { color: var(--accent); }
+  .move-btn:disabled { opacity: 0.2; cursor: default; }
   .session-primary {
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.25rem;
     flex: 1;
     min-width: 0;
   }
-  .pid {
-    font-family: ui-monospace, monospace;
-    font-size: 0.75rem;
+  .session-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .session-title {
+    font-weight: 600;
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    cursor: text;
+  }
+  .session-path {
+    font-size: 0.78rem;
     color: var(--text-secondary);
-  }
-  .cwd {
-    font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .terminal {
-    font-size: 0.72rem;
-    color: var(--accent);
-    font-family: ui-monospace, monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    margin-top: 0.1rem;
+  .rename-input {
+    flex: 1;
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.9rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    color: inherit;
+    outline: none;
   }
-  .session-meta {
+  .session-meta-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.4rem;
     font-size: 0.75rem;
-    color: var(--text-secondary);
   }
-  .config-dir {
-    font-family: ui-monospace, monospace;
-    background: var(--bg-tertiary);
-    padding: 0.05em 0.4em;
-    border-radius: 3px;
-  }
-  .account {
+  .account-badge {
     font-weight: 500;
     color: var(--text-primary);
   }
-  .account-label {
-    color: var(--text-secondary);
-    font-weight: 400;
-    margin-left: 0.25rem;
+  .quota-badge {
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
   }
   .quota {
     font-family: ui-monospace, monospace;
+  }
+  .restart-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--yellow);
+    border: 1px solid var(--yellow);
+    border-radius: 999px;
+    padding: 0 0.35em;
+    line-height: 1.5;
+    white-space: nowrap;
+    opacity: 0.9;
   }
   .quota-ok {
     color: var(--green);
@@ -311,8 +467,9 @@
     font-family: ui-monospace, monospace;
   }
   .session-actions {
-    position: relative;
-    flex-shrink: 0;
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
   }
   .swap-btn {
     padding: 0.35rem 0.6rem;
@@ -342,6 +499,11 @@
     z-index: 50;
     display: flex;
     flex-direction: column;
+  }
+  .picker.dropup {
+    top: auto;
+    bottom: calc(100% + 4px);
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.25);
   }
   .picker-item {
     text-align: left;

@@ -1,12 +1,19 @@
 //! Quota state management — load, save, update with payload-hash cursor.
 
-use super::{AccountQuota, QuotaFile, UsageWindow};
+use super::QuotaFile;
 use crate::error::ConfigError;
 use crate::platform::fs::{atomic_replace, secure_file};
-use crate::platform::lock;
-use crate::types::AccountNum;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use super::{AccountQuota, UsageWindow};
+#[cfg(test)]
+use crate::platform::lock;
+#[cfg(test)]
+use crate::types::AccountNum;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+#[cfg(test)]
 use tracing::debug;
 
 /// Returns the path to quota.json within a base directory.
@@ -74,8 +81,7 @@ pub fn save_state(base_dir: &Path, quota_file: &QuotaFile) -> Result<(), ConfigE
 }
 
 /// Computes a deterministic hash of a rate_limits payload for cursor comparison.
-///
-/// Used to prevent stale quota data from being applied after a swap.
+#[cfg(test)]
 pub fn payload_hash(payload: &serde_json::Value) -> String {
     let serialized = serde_json::to_string(payload).unwrap_or_default();
     let digest = Sha256::digest(serialized.as_bytes());
@@ -83,6 +89,7 @@ pub fn payload_hash(payload: &serde_json::Value) -> String {
 }
 
 /// Reads the last-processed payload hash for a config dir.
+#[cfg(test)]
 pub fn read_cursor(config_dir: &Path) -> Option<String> {
     std::fs::read_to_string(cursor_path(config_dir))
         .ok()
@@ -90,6 +97,7 @@ pub fn read_cursor(config_dir: &Path) -> Option<String> {
 }
 
 /// Writes the current payload hash to the config dir's cursor file.
+#[cfg(test)]
 pub fn write_cursor(config_dir: &Path, hash: &str) -> Result<(), ConfigError> {
     let path = cursor_path(config_dir);
     let tmp = crate::platform::fs::unique_tmp_path(&path);
@@ -106,10 +114,16 @@ pub fn write_cursor(config_dir: &Path, hash: &str) -> Result<(), ConfigError> {
 
 /// Updates quota for an account from a CC rate_limits payload.
 ///
+/// **Test-only.** Production quota writes go through the daemon's usage
+/// poller, which polls Anthropic's `/api/oauth/usage` directly per account.
+/// Terminal-sourced rate_limits (CC statusline JSON) MUST NOT be written
+/// to quota.json — see `rules/account-terminal-separation.md`.
+///
 /// Uses file locking on quota.json to prevent concurrent corruption.
 /// Uses payload-hash cursor to reject stale data (after swap).
 ///
 /// Returns `true` if quota was updated, `false` if skipped (stale/duplicate).
+#[cfg(test)]
 pub fn update_quota(
     base_dir: &Path,
     config_dir: &Path,
@@ -161,6 +175,7 @@ pub fn update_quota(
 }
 
 /// Parses a usage window from a rate_limits JSON object.
+#[cfg(test)]
 fn parse_window(rate_limits: &serde_json::Value, key: &str) -> Option<UsageWindow> {
     let window = rate_limits.get(key)?;
     let used = window.get("used_percentage")?.as_f64()?;

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Statusline hook — shows account + quota, feeds data to rotation engine
+# Statusline hook — pure shell + Rust csq binary, no Python.
+# `csq statusline` handles snapshot, sync, quota update, and rendering.
 
 command -v jq >/dev/null 2>&1 || { echo ""; exit 0; }
 
-# Resolve Python 3 once. Windows uses python/py instead of python3.
-PY=""
-for cmd in python3 python py; do
-    if command -v "$cmd" >/dev/null 2>&1 && "$cmd" --version 2>&1 | grep -q "Python 3"; then
-        PY="$cmd"
+# Locate the csq binary
+CSQ=""
+for candidate in "$HOME/.claude/accounts/csq" "$(command -v csq 2>/dev/null)"; do
+    if [ -x "$candidate" ]; then
+        CSQ="$candidate"
         break
     fi
 done
-[[ -n "$PY" ]] || { echo ""; exit 0; }
+[[ -n "$CSQ" ]] || { echo ""; exit 0; }
 
 # Read JSON input from stdin
 input=$(cat)
@@ -21,9 +22,7 @@ current_dir=$(echo "$input" | jq -r '.workspace.current_dir')
 model_name=$(echo "$input" | jq -r '.model.display_name')
 project_name=$(basename "$current_dir")
 
-# Extract context window usage (current turn — what's actually in the window)
-# cache_creation = new content being cached, cache_read = reused from cache
-# input_tokens = non-cached input, output_tokens = model output
+# Context window usage
 ctx_input=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // 0')
 ctx_output=$(echo "$input" | jq -r '.context_window.current_usage.output_tokens // 0')
 ctx_cache_create=$(echo "$input" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
@@ -33,34 +32,14 @@ ctx_used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // 0')
 # Session cost
 session_cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
 
-# Snapshot the live account when CC has just (re)started.
-# Cheap path: one os.kill probe and return.
-# MUST run synchronously and BEFORE `update`, so update_quota() attributes
-# the incoming rate_limits to the correct (live) account.
-"$PY" "$HOME/.claude/accounts/rotation-engine.py" snapshot 2>/dev/null
-
-# Bidirectional sync: backsync (live → canonical when live is newer) +
-# pullsync (canonical → live when canonical is newer). Run together in
-# one Python invocation to avoid spawning two background processes per
-# render. Backsync first so pullsync sees the just-written canonical.
-#
-# Pullsync is what makes "5 terminals on the same account" tolerable:
-# when terminal A's CC refreshes and updates canonical via backsync,
-# terminal B's next render pulls those credentials into config-B/.credentials.json
-# BEFORE B's CC tries to refresh, so B never attempts to use a stale
-# (just-rotated) refresh token and never 401s.
-"$PY" "$HOME/.claude/accounts/rotation-engine.py" sync 2>/dev/null &
-
-# Feed quota data to rotation engine.
-echo "$input" | "$PY" "$HOME/.claude/accounts/rotation-engine.py" update 2>/dev/null &
-
 # Change to the current directory for git operations
 cd "$current_dir" 2>/dev/null || cd ~
 
-# Function to get account + quota info
+# csq statusline: reads CC JSON from stdin, runs snapshot + sync + quota update,
+# outputs the formatted account + quota string. All in one Rust binary call.
 get_claude_account() {
     local quota
-    quota=$("$PY" "$HOME/.claude/accounts/rotation-engine.py" statusline 2>/dev/null)
+    quota=$(echo "$input" | "$CSQ" statusline 2>/dev/null)
 
     if [ -n "$quota" ]; then
         echo "${quota}"
@@ -71,7 +50,7 @@ get_claude_account() {
     fi
 }
 
-# Function to get git status (branch + dirty indicator only)
+# Git status (branch + dirty indicator)
 get_git_status() {
     if git rev-parse --git-dir > /dev/null 2>&1; then
         local branch=$(git branch --show-current 2>/dev/null || echo "detached")
@@ -83,7 +62,7 @@ get_git_status() {
     fi
 }
 
-# Function to format token count (compact: 1.2k, 45k, 1.2M)
+# Format token count (compact: 1.2k, 45k, 1.2M)
 fmt_tokens() {
     local n="$1"
     if [ "$n" -ge 1000000 ]; then
@@ -95,8 +74,7 @@ fmt_tokens() {
     fi
 }
 
-# Detect if THIS terminal is a csq-managed terminal
-# (CLAUDE_CONFIG_DIR points to ~/.claude/accounts/config-N)
+# Detect if THIS terminal is csq-managed
 is_csq_terminal=false
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [[ "$CLAUDE_CONFIG_DIR" == "$HOME/.claude/accounts/config-"* ]]; then
     is_csq_terminal=true
@@ -105,7 +83,6 @@ fi
 # Build the status line
 status_parts=()
 
-# Add csq marker + account information first (most prominent)
 claude_account=$(get_claude_account)
 if $is_csq_terminal; then
     if [ -n "$claude_account" ]; then
@@ -117,7 +94,7 @@ elif [ -n "$claude_account" ]; then
     status_parts+=("${claude_account}")
 fi
 
-# Context window: total tokens in current window + % used
+# Context window
 ctx_total=$((ctx_input + ctx_output + ctx_cache_create + ctx_cache_read))
 if [ "$ctx_total" -gt 0 ]; then
     ctx_fmt=$(fmt_tokens "$ctx_total")

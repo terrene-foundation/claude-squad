@@ -69,7 +69,23 @@ pub fn fan_out_credentials(base_dir: &Path, account: AccountNum, creds: &Credent
             }
         }
 
-        match credentials::save(&live_path, creds) {
+        // Guard: if the refreshed credentials lack subscriptionType
+        // (freshly exchanged, CC hasn't backfilled), preserve it
+        // from the existing live credentials to prevent CC from
+        // falling back to Sonnet ("subscription contamination").
+        let mut write_creds = creds.clone();
+        if write_creds.claude_ai_oauth.subscription_type.is_none() {
+            if let Ok(existing) = credentials::load(&live_path) {
+                if existing.claude_ai_oauth.subscription_type.is_some() {
+                    write_creds.claude_ai_oauth.subscription_type =
+                        existing.claude_ai_oauth.subscription_type;
+                    write_creds.claude_ai_oauth.rate_limit_tier =
+                        existing.claude_ai_oauth.rate_limit_tier;
+                }
+            }
+        }
+
+        match credentials::save(&live_path, &write_creds) {
             Ok(()) => {
                 debug!(dir = %dir.display(), "fanout complete");
                 updated += 1;

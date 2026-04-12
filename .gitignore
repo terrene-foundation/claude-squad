@@ -35,3 +35,13 @@ journal/*-data/
 # Tracking it produces churn on every commit and never carries useful diffs.
 # Matches at any depth (csq-desktop/.claude/learning/ too) via the **/ prefix.
 **/.claude/learning/
+
+# IDE settings
+.vscode/
+**/.vscode/
+
+# Session notes (ephemeral, per-machine)
+workspaces/**/.session-notes
+
+# COC eval environment (large, local-only)
+coc-eval/

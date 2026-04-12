@@ -1,13 +1,42 @@
 //! OAuth token refresh — exchange a refresh token for new access/refresh tokens.
 
 use super::CredentialFile;
-use crate::error::OAuthError;
+use crate::error::{redact_tokens, OAuthError};
 use crate::types::{AccessToken, RefreshToken};
 use serde::Deserialize;
 use std::fmt;
 
 /// Anthropic OAuth token endpoint.
 pub const TOKEN_ENDPOINT: &str = "https://platform.claude.com/v1/oauth/token";
+
+/// Extracts a human-readable error from a token endpoint error
+/// response. See [`crate::oauth::exchange::extract_oauth_error`]
+/// for the full format documentation (handles both API-style and
+/// standard OAuth error shapes).
+fn extract_oauth_error(body: &[u8]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let error_val = json.get("error")?;
+
+    let detail = if let Some(obj) = error_val.as_object() {
+        let err_type = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        match obj.get("message").and_then(|v| v.as_str()) {
+            Some(msg) => format!("{err_type}: {msg}"),
+            None => err_type.to_string(),
+        }
+    } else if let Some(err_str) = error_val.as_str() {
+        match json.get("error_description").and_then(|v| v.as_str()) {
+            Some(desc) => format!("{err_str}: {desc}"),
+            None => err_str.to_string(),
+        }
+    } else {
+        return None;
+    };
+
+    Some(redact_tokens(&detail))
+}
 
 /// Response from the Anthropic OAuth token endpoint.
 ///
@@ -83,19 +112,22 @@ where
 {
     let body = build_refresh_body(existing.claude_ai_oauth.refresh_token.expose_secret());
 
-    let response_bytes = http_post(TOKEN_ENDPOINT, &body)
-        .map_err(|e| OAuthError::Exchange(crate::error::redact_tokens(&e)))?;
+    let response_bytes =
+        http_post(TOKEN_ENDPOINT, &body).map_err(|e| OAuthError::Exchange(redact_tokens(&e)))?;
 
-    // serde_json::Error's Display may include a fragment of the input
-    // bytes when a parse fails partway through. If Anthropic returns
-    // an HTML error page or a truncated `invalid_grant` body that
-    // echoes our submitted `refresh_token`, that substring could
-    // ride into the OAuthError and reach tracing / IPC cache / error
-    // logs. Redact known token prefixes before the error escapes.
-    let response: RefreshResponse = serde_json::from_slice(&response_bytes).map_err(|e| {
-        let raw = format!("invalid response JSON: {e}");
-        OAuthError::Exchange(crate::error::redact_tokens(&raw))
-    })?;
+    // Try to deserialize as a success response. If that fails,
+    // check whether the server returned a structured error and
+    // surface the actual reason.
+    let response: RefreshResponse = match serde_json::from_slice(&response_bytes) {
+        Ok(r) => r,
+        Err(serde_err) => {
+            if let Some(detail) = extract_oauth_error(&response_bytes) {
+                return Err(OAuthError::Exchange(detail));
+            }
+            let raw = format!("invalid response JSON: {serde_err}");
+            return Err(OAuthError::Exchange(redact_tokens(&raw)));
+        }
+    };
 
     Ok(merge_refresh(existing, &response))
 }
@@ -228,6 +260,64 @@ mod tests {
         match result {
             Err(OAuthError::Exchange(msg)) => {
                 assert!(msg.contains("invalid response JSON"));
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_surfaces_oauth_error_string_format() {
+        let existing = sample_creds();
+        let result = refresh_token(&existing, |_url, _body| {
+            Ok(br#"{"error":"invalid_grant","error_description":"The refresh token has been revoked"}"#.to_vec())
+        });
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(msg.contains("invalid_grant"), "should surface: {msg}");
+                assert!(
+                    msg.contains("refresh token has been revoked"),
+                    "should surface: {msg}"
+                );
+                assert!(
+                    !msg.contains("missing field"),
+                    "should NOT show serde error: {msg}"
+                );
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_surfaces_api_style_error_object() {
+        let existing = sample_creds();
+        let result = refresh_token(&existing, |_url, _body| {
+            Ok(
+                br#"{"error":{"type":"invalid_grant","message":"Token has been revoked"}}"#
+                    .to_vec(),
+            )
+        });
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(msg.contains("invalid_grant"), "should surface: {msg}");
+                assert!(
+                    msg.contains("Token has been revoked"),
+                    "should surface: {msg}"
+                );
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_redacts_tokens_in_error_description() {
+        let existing = sample_creds();
+        let result = refresh_token(&existing, |_url, _body| {
+            Ok(br#"{"error":"invalid_grant","error_description":"bad token sk-ant-ort01-LEAKED-SECRET"}"#.to_vec())
+        });
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(!msg.contains("LEAKED-SECRET"), "must be redacted: {msg}");
+                assert!(msg.contains("invalid_grant"));
             }
             other => panic!("expected Exchange error, got {other:?}"),
         }

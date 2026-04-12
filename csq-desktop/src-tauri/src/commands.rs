@@ -3,9 +3,7 @@ use csq_core::accounts::discovery;
 use csq_core::accounts::AccountSource;
 use csq_core::broker::fanout;
 use csq_core::credentials::{self, file as cred_file};
-use csq_core::oauth::{
-    exchange_code, start_login as oauth_start_login, LoginRequest, PASTE_CODE_REDIRECT_URI,
-};
+use csq_core::oauth::{exchange_code, LoginRequest, PASTE_CODE_REDIRECT_URI};
 use csq_core::providers;
 use csq_core::quota::state as quota_state;
 use csq_core::quota::QuotaFile;
@@ -30,7 +28,9 @@ pub struct AccountView {
     pub source: String,
     pub has_credentials: bool,
     pub five_hour_pct: f64,
+    pub five_hour_resets_in: Option<i64>,
     pub seven_day_pct: f64,
+    pub seven_day_resets_in: Option<i64>,
     pub updated_at: f64,
     /// "healthy" | "expiring" | "expired" | "missing"
     pub token_status: String,
@@ -78,10 +78,20 @@ pub fn get_accounts(base_dir: String) -> Result<Vec<AccountView>, String> {
         .map(|a| {
             let q = quota.get(a.id);
 
-            // Token health: load credential file and check expiry.
-            // Also read the broker-failed flag file for the reason
-            // tag so the dashboard can render "Expired — <tag>".
-            let (token_status, expires_in_secs, last_refresh_error) =
+            // Token health depends on account type:
+            // - Anthropic accounts: check OAuth credential expiry
+            // - 3P accounts (MiniMax, Z.AI): API-key based, no expiry
+            let is_third_party = matches!(a.source, AccountSource::ThirdParty { .. });
+            let (token_status, expires_in_secs, last_refresh_error) = if is_third_party {
+                // 3P accounts use API keys, not OAuth tokens.
+                // They're "healthy" if they have a key configured.
+                let status = if a.has_credentials {
+                    "healthy"
+                } else {
+                    "missing"
+                };
+                (status.to_string(), None, None)
+            } else {
                 match AccountNum::try_from(a.id) {
                     Ok(num) => {
                         let canonical = cred_file::canonical_path(&base, num);
@@ -105,7 +115,8 @@ pub fn get_accounts(base_dir: String) -> Result<Vec<AccountView>, String> {
                         }
                     }
                     Err(_) => ("missing".to_string(), None, None),
-                };
+                }
+            };
 
             AccountView {
                 id: a.id,
@@ -117,7 +128,19 @@ pub fn get_accounts(base_dir: String) -> Result<Vec<AccountView>, String> {
                 },
                 has_credentials: a.has_credentials,
                 five_hour_pct: q.map(|q| q.five_hour_pct()).unwrap_or(0.0),
+                five_hour_resets_in: q.and_then(|q| {
+                    q.five_hour.as_ref().map(|w| {
+                        let now = now_ms / 1000;
+                        w.resets_at as i64 - now as i64
+                    })
+                }),
                 seven_day_pct: q.map(|q| q.seven_day_pct()).unwrap_or(0.0),
+                seven_day_resets_in: q.and_then(|q| {
+                    q.seven_day.as_ref().map(|w| {
+                        let now = now_ms / 1000;
+                        w.resets_at as i64 - now as i64
+                    })
+                }),
                 updated_at: q.map(|q| q.updated_at).unwrap_or(0.0),
                 token_status,
                 expires_in_secs,
@@ -147,6 +170,18 @@ pub fn swap_account(base_dir: String, target: u16) -> Result<String, String> {
     rotation::swap_to(&base, config_dir, account)
         .map(|r| format!("Swapped to account {}", r.account))
         .map_err(|e| e.to_string())
+}
+
+/// Renames an account's display label in profiles.json.
+#[tauri::command]
+pub fn rename_account(base_dir: String, account: u16, name: String) -> Result<(), String> {
+    let base = PathBuf::from(&base_dir);
+    let account_num = AccountNum::try_from(account).map_err(|e| format!("invalid account: {e}"))?;
+    if name.trim().is_empty() {
+        return Err("name must not be empty".into());
+    }
+    csq_core::accounts::profiles::update_email(&base, account_num, name.trim())
+        .map_err(|e| format!("rename failed: {e}"))
 }
 
 /// Returns the current auto-rotation configuration.
@@ -192,6 +227,8 @@ pub struct SessionView {
     pub account_label: Option<String>,
     /// Current 5-hour quota percentage for the bound account.
     pub five_hour_pct: f64,
+    /// Current 7-day quota percentage for the bound account.
+    pub seven_day_pct: f64,
     /// Unix seconds since the process started, or null if the
     /// platform could not report it.
     pub started_at: Option<u64>,
@@ -207,6 +244,11 @@ pub struct SessionView {
     /// Human-readable iTerm2 tab title resolved via osascript.
     /// Most specific identifier when available.
     pub terminal_title: Option<String>,
+    /// True when `.csq-account` marker was modified after the CC
+    /// process started — meaning a swap happened while this session
+    /// was running. CC won't pick up the new credentials until the
+    /// user restarts their `claude` session.
+    pub needs_restart: bool,
 }
 
 /// Returns the list of live Claude Code sessions under the current
@@ -235,28 +277,47 @@ pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
 
     let mut out = Vec::with_capacity(sessions.len());
     for s in sessions {
-        // The session's `account_id` is derived from the config dir
-        // name (`config-5` → `5`), but the dir's *current* active
-        // account comes from the live state marker — it may have
-        // been rotated by the daemon since the terminal launched.
-        // Prefer the live state for the dashboard display so a row
-        // like "config-5 → account #3" reflects reality.
-        let live_account = AccountNum::try_from(s.account_id.unwrap_or(0))
-            .ok()
-            .map(|n| n.get());
+        // Use the `.csq-account` marker for the live account, not
+        // the config dir name. The marker reflects swaps and renames
+        // (e.g. config-8 with marker=7 after a slot rename).
+        let live_account = csq_core::accounts::markers::read_csq_account(&s.config_dir)
+            .map(|n| n.get())
+            .or(s.account_id);
         let account_info = live_account.and_then(|id| accounts.iter().find(|a| a.id == id));
         let account_label = account_info.map(|a| a.label.clone());
         let five_hour_pct = live_account
             .and_then(|id| quota.get(id).map(|q| q.five_hour_pct()))
             .unwrap_or(0.0);
+        let seven_day_pct = live_account
+            .and_then(|id| quota.get(id).map(|q| q.seven_day_pct()))
+            .unwrap_or(0.0);
+
+        // Detect stale sessions: if the marker file was modified
+        // after the CC process started, a swap happened while it was
+        // running. CC caches credentials in memory, so the process
+        // is still using the OLD account's tokens.
+        let needs_restart = s.started_at.is_some_and(|proc_start| {
+            let marker_path = s.config_dir.join(".csq-account");
+            std::fs::metadata(&marker_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| {
+                    mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                })
+                .is_some_and(|marker_secs| marker_secs > proc_start)
+        });
 
         out.push(SessionView {
             pid: s.pid,
             cwd: s.cwd.display().to_string(),
             config_dir: s.config_dir.display().to_string(),
-            account_id: s.account_id,
+            account_id: live_account,
             account_label,
             five_hour_pct,
+            seven_day_pct,
             started_at: s.started_at,
             tty: s.tty,
             term_window: s.term_window,
@@ -264,6 +325,7 @@ pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
             term_pane: s.term_pane,
             iterm_profile: s.iterm_profile,
             terminal_title: s.terminal_title,
+            needs_restart,
         });
     }
 
@@ -341,12 +403,18 @@ pub fn swap_session(base_dir: String, config_dir: String, target: u16) -> Result
             "account {target} is a third-party provider slot; swap it from the Accounts tab instead"
         ));
     }
+    // Use the `.csq-account` marker (not the config dir number) to
+    // determine the source account. After a rename (e.g. config-8
+    // with marker=7), the dir number no longer matches any account.
+    let source_account = csq_core::accounts::markers::read_csq_account(&config_canon)
+        .map(|a| a.get())
+        .unwrap_or(n);
     let source_is_third_party = all_accounts
         .iter()
-        .any(|a| a.id == n && matches!(a.source, AccountSource::ThirdParty { .. }));
+        .any(|a| a.id == source_account && matches!(a.source, AccountSource::ThirdParty { .. }));
     if source_is_third_party {
         return Err(format!(
-            "{name} is bound to a third-party provider; \
+            "{name} is bound to a third-party provider (account {source_account}); \
              unbind it from settings.json before rotating to an OAuth account"
         ));
     }
@@ -419,6 +487,7 @@ pub fn list_providers() -> Result<Vec<ProviderView>, String> {
 /// the authorize URL, the CSRF state token, and the target account,
 /// but no tokens, verifier, or authorization code.
 #[derive(Serialize)]
+#[allow(dead_code)] // scaffolding for loopback OAuth — will be wired when desktop login is in-process
 pub struct ClaudeLoginView {
     /// Full Anthropic authorize URL the frontend should open (either
     /// in a child WebviewWindow or as a fallback in the system
@@ -447,30 +516,60 @@ impl From<LoginRequest> for ClaudeLoginView {
     }
 }
 
-/// Initiates an Anthropic OAuth login for the given account slot.
+/// Runs `claude auth login` for the given account slot.
 ///
-/// Generates a fresh PKCE verifier + state token, records them in
-/// the shared [`OAuthStateStore`], and returns a paste-code
-/// authorize URL the frontend should open in the system browser.
+/// This delegates the entire OAuth flow to Claude Code's binary —
+/// the same flow that CC's `/login` uses. CC handles browser open,
+/// callback capture, token exchange, and credential storage.
 ///
-/// After the user authorizes, Anthropic displays an authorization
-/// code on its callback page. The frontend collects that code from
-/// the user and submits it via [`submit_oauth_code`] to complete
-/// the login.
+/// After CC completes, we read credentials from the keychain and
+/// save them to canonical `credentials/N.json`.
 ///
-/// # Errors
-///
-/// - `"invalid account: ..."` — account number is out of range
+/// This is a BLOCKING command — runs in a spawned thread so it
+/// doesn't freeze the UI. The frontend should show a spinner.
 #[tauri::command]
-pub fn start_claude_login(
-    state: State<'_, AppState>,
-    account: u16,
-) -> Result<ClaudeLoginView, String> {
+pub async fn start_claude_login(base_dir: String, account: u16) -> Result<u16, String> {
     let account_num = AccountNum::try_from(account).map_err(|e| format!("invalid account: {e}"))?;
+    let base = std::path::PathBuf::from(&base_dir);
 
-    oauth_start_login(&state.oauth_store, account_num)
-        .map(ClaudeLoginView::from)
-        .map_err(|e| format!("failed to start login: {e}"))
+    tokio::task::spawn_blocking(move || {
+        let config_dir = base.join(format!("config-{}", account_num));
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("failed to create config dir: {e}"))?;
+
+        // Mark this dir with the account number
+        csq_core::accounts::markers::write_csq_account(&config_dir, account_num)
+            .map_err(|e| format!("failed to write marker: {e}"))?;
+
+        // Run claude auth login with isolated config dir
+        let status = std::process::Command::new("claude")
+            .args(["auth", "login"])
+            .env("CLAUDE_CONFIG_DIR", &config_dir)
+            .status()
+            .map_err(|e| format!("failed to run `claude auth login`: {e}"))?;
+
+        if !status.success() {
+            return Err("claude auth login failed or was cancelled".to_string());
+        }
+
+        // Read credentials — keychain first, then file
+        let captured = csq_core::credentials::keychain::read(&config_dir)
+            .or_else(|| credentials::load(&config_dir.join(".credentials.json")).ok());
+
+        let creds = captured
+            .ok_or_else(|| "no credentials captured after login — try again".to_string())?;
+
+        // Save canonical
+        credentials::save_canonical(&base, account_num, &creds)
+            .map_err(|e| format!("credential write failed: {e}"))?;
+
+        // Clear broker-failed flag
+        csq_core::broker::fanout::clear_broker_failed(&base, account_num);
+
+        Ok(account_num.get())
+    })
+    .await
+    .map_err(|e| format!("login task failed: {e}"))?
 }
 
 /// Submits a paste-code from Anthropic's OAuth callback page and
@@ -509,17 +608,11 @@ pub fn submit_oauth_code(
     state_token: String,
     code: String,
 ) -> Result<u16, String> {
-    // Clean the pasted code: strip whitespace, CR (Windows paste),
-    // and any `#state=...` fragment the user may have accidentally
-    // included. Anthropic's paste-code page displays the code as a
-    // single string in a copy box — normal paste gives us just the
-    // code, but we defend against the user highlighting extra
-    // characters on either side.
+    // Clean the pasted code: strip whitespace and CR (Windows paste).
+    // Anthropic authorization codes can contain `#` characters, so
+    // we must NOT strip at `#` — doing so truncates the code and
+    // causes the exchange to fail.
     let code = code.trim().trim_end_matches('\r').to_string();
-    let code = code
-        .split_once('#')
-        .map(|(c, _)| c.to_string())
-        .unwrap_or(code);
     if code.is_empty() {
         return Err("invalid code: paste was empty".into());
     }
@@ -532,17 +625,12 @@ pub fn submit_oauth_code(
         .consume(&state_token)
         .map_err(|e| format!("no matching login: {e}"))?;
 
-    // Run the token exchange synchronously. Production uses
-    // `csq_core::http::post_json` which is blocking reqwest under
-    // the hood. Tauri commands run on the async runtime but this
-    // particular call is short (one HTTP round-trip) and carries
-    // no secret material in its error path (OAuthError is already
-    // redacted), so we do not need spawn_blocking.
+    // Run the token exchange using reqwest's built-in form encoding.
     let credential = exchange_code(
         &code,
         &pending.code_verifier,
         PASTE_CODE_REDIRECT_URI,
-        csq_core::http::post_json,
+        csq_core::http::post_form_params,
     )
     .map_err(|e| format!("exchange failed: {e}"))?;
 

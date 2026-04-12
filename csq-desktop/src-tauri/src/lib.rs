@@ -230,37 +230,34 @@ fn most_recent_config_dir(base: &Path) -> Option<PathBuf> {
 fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app);
 
+    // Show account status (read-only) — quota at a glance without
+    // opening the dashboard. No swap action — use Sessions tab for that.
     if let Some(base) = base_dir() {
         if base.is_dir() {
-            // `discover_all` — OAuth slots + per-slot 3P bindings
-            // (e.g. slot 9 MiniMax, slot 10 Z.AI). The user sees the
-            // same unified account list in the tray that the
-            // dashboard shows, so glancing at the tray doesn't make
-            // half their accounts silently disappear. Click-side
-            // routing in `handle_tray_event` short-circuits 3P
-            // clicks because rotation::swap_to only knows how to
-            // copy OAuth credential files, not 3P settings blobs.
             let accounts = discovery::discover_all(&base);
+            let quota = csq_core::quota::state::load_state(&base)
+                .unwrap_or_else(|_| csq_core::quota::QuotaFile::empty());
             let mut had_any = false;
             for a in &accounts {
                 if !a.has_credentials {
                     continue;
                 }
                 had_any = true;
-                // 3P rows get a "(dashboard)" suffix so the user
-                // knows the tray click won't quick-swap — that
-                // workflow lives in the Sessions view.
-                let is_third_party = matches!(
-                    a.source,
-                    csq_core::accounts::AccountSource::ThirdParty { .. }
+                let q = quota.get(a.id);
+                let fh = q.map(|q| q.five_hour_pct()).unwrap_or(0.0);
+                let sd = q.map(|q| q.seven_day_pct()).unwrap_or(0.0);
+                let label = format!(
+                    "#{} {}  5h:{:.0}%  7d:{:.0}%",
+                    a.id,
+                    sanitize_label(&a.label),
+                    fh,
+                    sd,
                 );
-                let label = if is_third_party {
-                    format!("#{} {} (dashboard)", a.id, sanitize_label(&a.label))
-                } else {
-                    format!("#{} {}", a.id, sanitize_label(&a.label))
-                };
-                let id = format!("acct:{}", a.id);
-                let item = MenuItemBuilder::with_id(id, label).build(app)?;
+                // Use "info:" prefix so click handler knows this is status-only
+                let id = format!("info:{}", a.id);
+                let item = MenuItemBuilder::with_id(id, label)
+                    .enabled(false)
+                    .build(app)?;
                 builder = builder.item(&item);
             }
             if had_any {
@@ -691,6 +688,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_accounts,
             commands::swap_account,
+            commands::rename_account,
             commands::get_rotation_config,
             commands::set_rotation_enabled,
             commands::get_daemon_status,
