@@ -61,15 +61,59 @@ use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::Memory::ReadProcessMemory;
 use windows_sys::Win32::System::Threading::{
-    NtQueryInformationProcess, OpenProcess, ProcessBasicInformation, PROCESS_BASIC_INFORMATION,
-    PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
 };
+
+// ---------------------------------------------------------------------------
+// NtQueryInformationProcess FFI
+//
+// This ntdll.dll function is not exposed by the windows-sys crate.
+// We declare the minimal surface needed for PEB walking. The struct
+// layout and function signature are stable back through Vista and
+// match the Windows SDK's winternl.h declaration.
+// ---------------------------------------------------------------------------
+
+/// `PROCESSINFOCLASS` value for `NtQueryInformationProcess` that
+/// returns `ProcessBasicInfo`.
+const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+
+/// Minimal projection of `PROCESS_BASIC_INFORMATION` from winternl.h.
+/// Layout on 64-bit Windows (48 bytes, verified against SDK):
+///   offset  0: ExitStatus (i32, 4B + 4B padding)
+///   offset  8: PebBaseAddress (usize, 8B)
+///   offset 16: AffinityMask (usize, 8B)
+///   offset 24: BasePriority (i32, 4B + 4B padding)
+///   offset 32: UniqueProcessId (usize, 8B)
+///   offset 40: InheritedFromUniqueProcessId (usize, 8B)
+#[repr(C)]
+struct ProcessBasicInfo {
+    _exit_status: i32,
+    peb_base_address: usize,
+    _affinity_mask: usize,
+    _base_priority: i32,
+    _unique_process_id: usize,
+    _inherited_from_unique_process_id: usize,
+}
+
+extern "system" {
+    fn NtQueryInformationProcess(
+        process_handle: HANDLE,
+        process_information_class: u32,
+        process_information: *mut core::ffi::c_void,
+        process_information_length: u32,
+        return_length: *mut u32,
+    ) -> i32; // NTSTATUS
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Returns the list of live CC sessions for the current user.
 pub fn list() -> Vec<SessionInfo> {
@@ -91,7 +135,7 @@ fn enumerate_claude_pids() -> Vec<u32> {
     // bail. The returned handle is closed via CloseHandle in the
     // defer below.
     let snapshot: HANDLE = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot.is_null() || snapshot as isize == -1 {
+    if snapshot == 0 || snapshot == INVALID_HANDLE_VALUE {
         return Vec::new();
     }
 
@@ -121,11 +165,11 @@ fn enumerate_claude_pids() -> Vec<u32> {
 
 /// Opens a process, walks its PEB, extracts env and cwd.
 fn read_process(pid: u32) -> Option<SessionInfo> {
-    // SAFETY: OpenProcess returns NULL on failure. We check and
+    // SAFETY: OpenProcess returns NULL (0) on failure. We check and
     // bail immediately. The returned handle is closed in the
     // cleanup path below.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
-    if handle.is_null() {
+    if handle == 0 {
         return None;
     }
 
@@ -174,8 +218,8 @@ fn read_process(pid: u32) -> Option<SessionInfo> {
 ///
 /// Returns `(environment_block_bytes, cwd_utf16_as_string)`.
 fn read_peb_env_and_cwd(handle: HANDLE) -> Option<(Vec<u16>, String)> {
-    // Step 1: NtQueryInformationProcess → PROCESS_BASIC_INFORMATION.
-    let mut pbi: PROCESS_BASIC_INFORMATION = unsafe { zeroed() };
+    // Step 1: NtQueryInformationProcess → ProcessBasicInfo.
+    let mut pbi: ProcessBasicInfo = unsafe { zeroed() };
     let mut return_length: u32 = 0;
     // SAFETY: NtQueryInformationProcess with ProcessBasicInformation
     // takes a &mut PBI. We pass a properly-sized buffer. A non-zero
@@ -183,16 +227,16 @@ fn read_peb_env_and_cwd(handle: HANDLE) -> Option<(Vec<u16>, String)> {
     let status = unsafe {
         NtQueryInformationProcess(
             handle,
-            ProcessBasicInformation,
+            PROCESS_BASIC_INFORMATION_CLASS,
             &mut pbi as *mut _ as *mut _,
-            size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+            size_of::<ProcessBasicInfo>() as u32,
             &mut return_length,
         )
     };
     if status != 0 {
         return None;
     }
-    let peb_addr = pbi.PebBaseAddress as usize;
+    let peb_addr = pbi.peb_base_address;
     if peb_addr == 0 {
         return None;
     }
