@@ -55,7 +55,7 @@ use crate::error::{redact_tokens, OAuthError};
 use crate::oauth::constants::{OAUTH_CLIENT_ID, OAUTH_SCOPES, OAUTH_TOKEN_URL};
 use crate::oauth::pkce::CodeVerifier;
 use crate::types::{AccessToken, RefreshToken};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Fallback `expires_in` used if Anthropic's response omits the
@@ -63,20 +63,46 @@ use std::collections::HashMap;
 /// default and is also what v1.x hardcodes.
 const DEFAULT_EXPIRES_IN_SECS: u64 = 18000;
 
-/// Request body sent to the token endpoint for the initial
-/// authorization code grant.
+/// Extracts a human-readable error from a token endpoint error
+/// response.
 ///
-/// Serialized as JSON (Anthropic's `/v1/oauth/token` accepts both
-/// JSON and form-encoded; v1.x uses JSON for the authorization_code
-/// grant). This struct is **never** serialized into a log or an
-/// error — it carries the authorization code and the PKCE verifier.
-#[derive(Debug, Serialize)]
-struct ExchangeRequest<'a> {
-    grant_type: &'static str,
-    code: &'a str,
-    client_id: &'static str,
-    code_verifier: &'a str,
-    redirect_uri: &'a str,
+/// Anthropic uses two error shapes depending on the endpoint layer
+/// that rejects the request:
+///
+/// 1. **API-style** (observed on platform.claude.com):
+///    `{"error": {"type": "invalid_grant", "message": "..."}}`
+///
+/// 2. **Standard OAuth** (RFC 6749 §5.2):
+///    `{"error": "invalid_grant", "error_description": "..."}`
+///
+/// This function handles both. Returns `None` if the body is not
+/// valid JSON or does not contain a recognizable error structure.
+/// The returned string is always run through [`redact_tokens`].
+fn extract_oauth_error(body: &[u8]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let error_val = json.get("error")?;
+
+    let detail = if let Some(obj) = error_val.as_object() {
+        // API-style: {"error": {"type": "...", "message": "..."}}
+        let err_type = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        match obj.get("message").and_then(|v| v.as_str()) {
+            Some(msg) => format!("{err_type}: {msg}"),
+            None => err_type.to_string(),
+        }
+    } else if let Some(err_str) = error_val.as_str() {
+        // Standard OAuth: {"error": "invalid_grant", "error_description": "..."}
+        match json.get("error_description").and_then(|v| v.as_str()) {
+            Some(desc) => format!("{err_str}: {desc}"),
+            None => err_str.to_string(),
+        }
+    } else {
+        return None;
+    };
+
+    Some(redact_tokens(&detail))
 }
 
 /// Response from the token endpoint. Anthropic returns the same
@@ -126,7 +152,8 @@ impl std::fmt::Debug for TokenResponse {
 /// - `redirect_uri` — the exact redirect URI that was sent to the
 ///   authorize endpoint. Must be byte-identical.
 /// - `http_post` — transport closure. Production callers pass
-///   `csq_core::http::post_json`.
+///   `csq_core::http::post_form` (form-encoded, matching the
+///   OAuth 2.0 spec and the refresh path).
 ///
 /// # Errors
 ///
@@ -146,38 +173,52 @@ pub fn exchange_code<F>(
     http_post: F,
 ) -> Result<CredentialFile, OAuthError>
 where
-    F: FnOnce(&str, &str) -> Result<Vec<u8>, String>,
+    F: Fn(&str, &[(&str, &str)]) -> Result<Vec<u8>, String>,
 {
-    let request = ExchangeRequest {
-        grant_type: "authorization_code",
-        code,
-        client_id: OAUTH_CLIENT_ID,
-        code_verifier: verifier.expose_secret(),
-        redirect_uri,
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("client_id", OAUTH_CLIENT_ID),
+        ("code_verifier", verifier.expose_secret()),
+        ("redirect_uri", redirect_uri),
+    ];
+
+    // Retry with backoff on 429 (rate limit). Anthropic's token
+    // endpoint has aggressive rate limiting — a burst of login
+    // attempts (e.g., re-authing 8 accounts) can trigger it.
+    let mut response_bytes = Vec::new();
+    let delays = [0, 2, 5, 10]; // seconds to wait before each attempt
+    for (attempt, delay) in delays.iter().enumerate() {
+        if *delay > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(*delay));
+        }
+
+        response_bytes = http_post(OAUTH_TOKEN_URL, &params)
+            .map_err(|e| OAuthError::Exchange(redact_tokens(&e)))?;
+
+        // Check for rate limit (429) — retry if we have attempts left
+        if let Some(detail) = extract_oauth_error(&response_bytes) {
+            if detail.contains("rate_limit") && attempt < delays.len() - 1 {
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Try to deserialize as a success response. If that fails,
+    // check whether the server returned a structured error
+    // response and surface the actual reason rather than the
+    // confusing "missing field `access_token`" serde error.
+    let response: TokenResponse = match serde_json::from_slice(&response_bytes) {
+        Ok(r) => r,
+        Err(serde_err) => {
+            if let Some(detail) = extract_oauth_error(&response_bytes) {
+                return Err(OAuthError::Exchange(detail));
+            }
+            let raw = format!("invalid token response JSON: {serde_err}");
+            return Err(OAuthError::Exchange(redact_tokens(&raw)));
+        }
     };
-
-    // serde_json::to_string on the request struct never includes
-    // private data in its error path (only metadata about the
-    // failing field), but we still defensively run the error
-    // through redact_tokens.
-    let body = serde_json::to_string(&request).map_err(|e| {
-        OAuthError::Exchange(redact_tokens(&format!("failed to serialize request: {e}")))
-    })?;
-
-    let response_bytes =
-        http_post(OAUTH_TOKEN_URL, &body).map_err(|e| OAuthError::Exchange(redact_tokens(&e)))?;
-
-    // serde_json::from_slice error Display may include a fragment
-    // of the response body when parsing fails partway. If Anthropic
-    // returned a 4xx body echoing our authorization code back, that
-    // substring could ride into OAuthError::Exchange and reach a
-    // log. redact_tokens scrubs known token prefixes, and we
-    // additionally decline to format the full error — only the
-    // kind gets through.
-    let response: TokenResponse = serde_json::from_slice(&response_bytes).map_err(|e| {
-        let raw = format!("invalid token response JSON: {e}");
-        OAuthError::Exchange(redact_tokens(&raw))
-    })?;
 
     if response.access_token.is_empty() {
         return Err(OAuthError::Exchange(
@@ -232,20 +273,34 @@ mod tests {
     /// assert on what was actually sent to the mock transport.
     fn capturing_success<'a>(
         captured_url: &'a std::cell::RefCell<Option<String>>,
-        captured_body: &'a std::cell::RefCell<Option<String>>,
+        captured_params: &'a std::cell::RefCell<Option<Vec<(String, String)>>>,
         response_bytes: Vec<u8>,
-    ) -> impl FnOnce(&str, &str) -> Result<Vec<u8>, String> + 'a {
-        move |url: &str, body: &str| {
+    ) -> impl Fn(&str, &[(&str, &str)]) -> Result<Vec<u8>, String> + 'a {
+        move |url: &str, params: &[(&str, &str)]| {
             *captured_url.borrow_mut() = Some(url.to_string());
-            *captured_body.borrow_mut() = Some(body.to_string());
-            Ok(response_bytes)
+            *captured_params.borrow_mut() = Some(
+                params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
+            Ok(response_bytes.clone())
         }
     }
 
+    fn mock_ok(response: Vec<u8>) -> impl Fn(&str, &[(&str, &str)]) -> Result<Vec<u8>, String> {
+        move |_url: &str, _params: &[(&str, &str)]| Ok(response.clone())
+    }
+
+    fn mock_err(msg: &str) -> impl Fn(&str, &[(&str, &str)]) -> Result<Vec<u8>, String> {
+        let msg = msg.to_string();
+        move |_url: &str, _params: &[(&str, &str)]| Err(msg.clone())
+    }
+
     #[test]
-    fn exchange_code_builds_correct_request_body() {
+    fn exchange_code_builds_correct_request_params() {
         let captured_url = std::cell::RefCell::new(None);
-        let captured_body = std::cell::RefCell::new(None);
+        let captured_params = std::cell::RefCell::new(None);
         let response = br#"{
             "access_token": "sk-ant-oat01-test-access",
             "refresh_token": "sk-ant-ort01-test-refresh",
@@ -257,7 +312,7 @@ mod tests {
             "auth-code-123",
             &test_verifier(),
             "http://127.0.0.1:8420/oauth/callback",
-            capturing_success(&captured_url, &captured_body, response),
+            capturing_success(&captured_url, &captured_params, response),
         );
         assert!(result.is_ok());
 
@@ -267,18 +322,23 @@ mod tests {
             "exchange must POST to the Anthropic token endpoint"
         );
 
-        let body = captured_body.borrow().clone().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["grant_type"], "authorization_code");
-        assert_eq!(parsed["code"], "auth-code-123");
-        assert_eq!(parsed["client_id"], OAUTH_CLIENT_ID);
+        let params = captured_params.borrow().clone().unwrap();
+        let get = |key: &str| {
+            params
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("grant_type"), Some("authorization_code"));
+        assert_eq!(get("code"), Some("auth-code-123"));
+        assert_eq!(get("client_id"), Some(OAUTH_CLIENT_ID));
         assert_eq!(
-            parsed["code_verifier"],
-            "test-verifier-value-for-exchange-tests-only"
+            get("code_verifier"),
+            Some("test-verifier-value-for-exchange-tests-only")
         );
         assert_eq!(
-            parsed["redirect_uri"],
-            "http://127.0.0.1:8420/oauth/callback"
+            get("redirect_uri"),
+            Some("http://127.0.0.1:8420/oauth/callback")
         );
     }
 
@@ -295,7 +355,7 @@ mod tests {
             "code",
             &test_verifier(),
             "http://127.0.0.1:8420/oauth/callback",
-            |_, _| Ok(response),
+            mock_ok(response),
         )
         .unwrap();
 
@@ -329,7 +389,7 @@ mod tests {
         }"#
         .to_vec();
 
-        let creds = exchange_code("code", &test_verifier(), "uri", |_, _| Ok(response)).unwrap();
+        let creds = exchange_code("code", &test_verifier(), "uri", mock_ok(response)).unwrap();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -350,7 +410,7 @@ mod tests {
         }"#
         .to_vec();
 
-        let creds = exchange_code("code", &test_verifier(), "uri", |_, _| Ok(response)).unwrap();
+        let creds = exchange_code("code", &test_verifier(), "uri", mock_ok(response)).unwrap();
         // Must exactly match OAUTH_SCOPES, not the response string
         for (want, got) in OAUTH_SCOPES.iter().zip(creds.claude_ai_oauth.scopes.iter()) {
             assert_eq!(want, got);
@@ -364,9 +424,12 @@ mod tests {
 
     #[test]
     fn exchange_code_transport_error_is_redacted() {
-        let result = exchange_code("code", &test_verifier(), "uri", |_, _| {
-            Err("connection failed to sk-ant-oat01-LEAKED".to_string())
-        });
+        let result = exchange_code(
+            "code",
+            &test_verifier(),
+            "uri",
+            mock_err("connection failed to sk-ant-oat01-LEAKED"),
+        );
         match result {
             Err(OAuthError::Exchange(msg)) => {
                 assert!(
@@ -386,7 +449,7 @@ mod tests {
         // fragment of this input. redact_tokens must scrub it.
         let leaky = br#"{"access_token":"sk-ant-oat01-LEAKED-FROM-PARSE-ERROR"#.to_vec();
 
-        let result = exchange_code("code", &test_verifier(), "uri", |_, _| Ok(leaky));
+        let result = exchange_code("code", &test_verifier(), "uri", mock_ok(leaky));
         match result {
             Err(OAuthError::Exchange(msg)) => {
                 assert!(
@@ -403,7 +466,7 @@ mod tests {
     #[test]
     fn exchange_code_rejects_empty_access_token() {
         let response = br#"{"access_token":"","refresh_token":"rt","expires_in":1}"#.to_vec();
-        let result = exchange_code("c", &test_verifier(), "uri", |_, _| Ok(response));
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
         match result {
             Err(OAuthError::Exchange(msg)) => assert!(msg.contains("missing access_token")),
             other => panic!("expected missing access_token error, got {other:?}"),
@@ -413,7 +476,7 @@ mod tests {
     #[test]
     fn exchange_code_rejects_empty_refresh_token() {
         let response = br#"{"access_token":"at","refresh_token":"","expires_in":1}"#.to_vec();
-        let result = exchange_code("c", &test_verifier(), "uri", |_, _| Ok(response));
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
         match result {
             Err(OAuthError::Exchange(msg)) => assert!(msg.contains("missing refresh_token")),
             other => panic!("expected missing refresh_token error, got {other:?}"),
@@ -423,7 +486,7 @@ mod tests {
     #[test]
     fn exchange_code_rejects_missing_access_token() {
         let response = br#"{"refresh_token":"rt","expires_in":1}"#.to_vec();
-        let result = exchange_code("c", &test_verifier(), "uri", |_, _| Ok(response));
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
         match result {
             Err(OAuthError::Exchange(msg)) => {
                 // serde deserialization rejects missing required
@@ -439,6 +502,105 @@ mod tests {
     }
 
     #[test]
+    fn exchange_code_surfaces_oauth_error_string_format() {
+        // Standard OAuth error: {"error": "invalid_grant", "error_description": "..."}
+        let response =
+            br#"{"error":"invalid_grant","error_description":"The authorization code has expired"}"#
+                .to_vec();
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(
+                    msg.contains("invalid_grant"),
+                    "should surface the error type: {msg}"
+                );
+                assert!(
+                    msg.contains("authorization code has expired"),
+                    "should surface the description: {msg}"
+                );
+                assert!(
+                    !msg.contains("missing field"),
+                    "should NOT show serde error: {msg}"
+                );
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exchange_code_surfaces_api_style_error_object() {
+        // Anthropic API-style: {"error": {"type": "...", "message": "..."}}
+        let response =
+            br#"{"error":{"type":"invalid_grant","message":"The authorization code has expired or has already been used"}}"#
+                .to_vec();
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(
+                    msg.contains("invalid_grant"),
+                    "should surface the error type: {msg}"
+                );
+                assert!(
+                    msg.contains("authorization code has expired"),
+                    "should surface the message: {msg}"
+                );
+                assert!(
+                    !msg.contains("missing field"),
+                    "should NOT show serde error: {msg}"
+                );
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exchange_code_surfaces_rate_limit_error() {
+        // Observed: 429 with API-style error object
+        let response =
+            br#"{"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}"#
+                .to_vec();
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(msg.contains("rate_limit_error"), "should surface: {msg}");
+                assert!(msg.contains("Rate limited"), "should surface: {msg}");
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exchange_code_surfaces_oauth_error_without_description() {
+        let response = br#"{"error":"invalid_client"}"#.to_vec();
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(
+                    msg.contains("invalid_client"),
+                    "should surface the error type: {msg}"
+                );
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exchange_code_redacts_tokens_in_error_description() {
+        let response = br#"{"error":"invalid_grant","error_description":"bad token sk-ant-oat01-LEAKED-SECRET-VALUE"}"#.to_vec();
+        let result = exchange_code("c", &test_verifier(), "uri", mock_ok(response));
+        match result {
+            Err(OAuthError::Exchange(msg)) => {
+                assert!(
+                    !msg.contains("LEAKED-SECRET-VALUE"),
+                    "error description must be redacted: {msg}"
+                );
+                assert!(msg.contains("invalid_grant"));
+            }
+            other => panic!("expected Exchange error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn exchange_code_does_not_include_verifier_in_transport_error_path() {
         // Regression guard: if a future refactor ever routed the
         // request body (which contains the verifier) into the error
@@ -447,7 +609,7 @@ mod tests {
             "code",
             &CodeVerifier::new("SECRET_VERIFIER_VALUE_12345".to_string()),
             "uri",
-            |_, _| Err("some transport failure".to_string()),
+            mock_err("some transport failure"),
         );
         match result {
             Err(OAuthError::Exchange(msg)) => {
@@ -462,9 +624,14 @@ mod tests {
 
     #[test]
     fn exchange_code_uses_redirect_uri_verbatim() {
-        let captured_body = std::cell::RefCell::new(None);
-        let capture = |_url: &str, body: &str| {
-            *captured_body.borrow_mut() = Some(body.to_string());
+        let captured_params = std::cell::RefCell::new(None);
+        let capture = |_url: &str, params: &[(&str, &str)]| {
+            *captured_params.borrow_mut() = Some(
+                params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<Vec<_>>(),
+            );
             Ok(br#"{"access_token":"at","refresh_token":"rt","expires_in":1}"#.to_vec())
         };
 
@@ -476,11 +643,11 @@ mod tests {
         )
         .unwrap();
 
-        let body = captured_body.borrow().clone().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            parsed["redirect_uri"],
-            "http://127.0.0.1:8420/oauth/callback"
-        );
+        let params = captured_params.borrow().clone().unwrap();
+        let redir = params
+            .iter()
+            .find(|(k, _)| k == "redirect_uri")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(redir, Some("http://127.0.0.1:8420/oauth/callback"));
     }
 }

@@ -11,7 +11,9 @@
     source: string;
     has_credentials: boolean;
     five_hour_pct: number;
+    five_hour_resets_in: number | null;
     seven_day_pct: number;
+    seven_day_resets_in: number | null;
     updated_at: number;
     token_status: string;
     expires_in_secs: number | null;
@@ -33,7 +35,7 @@
       case 'broker_refresh_failed':
         return 'refresh failed — check network or re-login';
       case 'broker_other':
-        return 'broker error';
+        return 'recovery failed — re-login needed';
       case 'credential':
         return 'credential file error';
       case 'platform':
@@ -50,14 +52,113 @@
   }
 
   let accounts = $state<AccountView[]>([]);
+  let displayOrder = $state<number[]>([]);
   let error = $state<string | null>(null);
   let loading = $state(true);
   let modalOpen = $state(false);
-  /// When set, the Add Account modal targets this EXISTING slot
-  /// instead of the next free one. Used by the "Re-auth" button
-  /// on expired account cards so the user re-authenticates in
-  /// place rather than creating a new slot.
   let reauthSlot = $state<number | null>(null);
+
+  // ── Sort mode ────────────────────────────────────────────
+
+  type SortMode = 'custom' | '5h' | '7d';
+
+  function loadSortMode(): SortMode {
+    try {
+      const raw = localStorage.getItem('csq-sort-mode');
+      if (raw === '5h' || raw === '7d') return raw;
+    } catch {}
+    return 'custom';
+  }
+
+  function saveSortMode(mode: SortMode) {
+    try { localStorage.setItem('csq-sort-mode', mode); } catch {}
+  }
+
+  let sortMode = $state<SortMode>(loadSortMode());
+
+  function setSortMode(mode: SortMode) {
+    sortMode = mode;
+    saveSortMode(mode);
+  }
+
+  // ── Reorder ──────────────────────────────────────────────
+
+  function orderedAccounts(): AccountView[] {
+    if (displayOrder.length === 0) return accounts;
+    const byId = new Map(accounts.map(a => [a.id, a]));
+    const ordered: AccountView[] = [];
+    for (const id of displayOrder) {
+      const a = byId.get(id);
+      if (a) { ordered.push(a); byId.delete(id); }
+    }
+    for (const a of byId.values()) ordered.push(a);
+    return ordered;
+  }
+
+  // Final display list: custom order or sorted by reset time.
+  // Nulls sort to the bottom in both reset-time modes.
+  let displayedAccounts = $derived.by(() => {
+    const base = orderedAccounts();
+    if (sortMode === 'custom') return base;
+    const key: keyof AccountView = sortMode === '5h' ? 'five_hour_resets_in' : 'seven_day_resets_in';
+    return [...base].sort((a, b) => {
+      const av = a[key] as number | null;
+      const bv = b[key] as number | null;
+      const aValid = av != null && av > 0;
+      const bValid = bv != null && bv > 0;
+      if (aValid && bValid) return av! - bv!;
+      if (aValid) return -1;
+      if (bValid) return 1;
+      return 0;
+    });
+  });
+
+  let justMovedId = $state<number | null>(null);
+
+  function moveCard(idx: number, direction: -1 | 1) {
+    const items = [...orderedAccounts()];
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= items.length) return;
+    const movedId = items[idx].id;
+    [items[idx], items[newIdx]] = [items[newIdx], items[idx]];
+    displayOrder = items.map(a => a.id);
+    saveOrder(displayOrder);
+    // Highlight the moved card briefly
+    justMovedId = movedId;
+    setTimeout(() => { justMovedId = null; }, 600);
+  }
+
+  function saveOrder(order: number[]) {
+    try { localStorage.setItem('csq-card-order', JSON.stringify(order)); } catch {}
+  }
+  function loadOrder(): number[] {
+    try {
+      const raw = localStorage.getItem('csq-card-order');
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+
+  // ── "Resets soonest" badge ───────────────────────────────
+  //
+  // Only show a badge when 2+ accounts have a positive reset value
+  // for a given window. The badge appears on the one account whose
+  // reset time is smallest (i.e. the soonest to free up quota).
+
+  let soonest5hId = $derived.by(() => {
+    const candidates = accounts.filter(a => a.five_hour_resets_in != null && a.five_hour_resets_in > 0);
+    if (candidates.length < 2) return null;
+    return candidates.reduce((best, a) =>
+      a.five_hour_resets_in! < best.five_hour_resets_in! ? a : best
+    ).id;
+  });
+
+  let soonest7dId = $derived.by(() => {
+    const candidates = accounts.filter(a => a.seven_day_resets_in != null && a.seven_day_resets_in > 0);
+    if (candidates.length < 2) return null;
+    return candidates.reduce((best, a) =>
+      a.seven_day_resets_in! < best.seven_day_resets_in! ? a : best
+    ).id;
+  });
 
   // ── First-paint instrumentation ──────────────────────────
   //
@@ -128,8 +229,46 @@
     }
   }
 
-  // Initial fetch + 5-second poll
+  // ── Inline rename ───────────────────────────────────────
+  let editingId = $state<number | null>(null);
+  let editValue = $state('');
+
+  function startRename(account: AccountView, e: MouseEvent) {
+    e.stopPropagation();
+    editingId = account.id;
+    editValue = account.label;
+  }
+
+  async function saveRename(accountId: number) {
+    if (!editValue.trim()) { editingId = null; return; }
+    try {
+      const baseDir = await getBaseDir();
+      await invoke('rename_account', { baseDir, account: accountId, name: editValue.trim() });
+      editingId = null;
+      await fetchAccounts();
+    } catch (e) {
+      error = String(e);
+      editingId = null;
+    }
+  }
+
+  function formatResetTime(secs: number | null): string {
+    if (secs == null || secs <= 0) return '';
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return m > 0 ? `${h}h${m}m` : `${h}h`;
+  }
+
+  function handleRenameKeydown(e: KeyboardEvent, accountId: number) {
+    if (e.key === 'Enter') saveRename(accountId);
+    if (e.key === 'Escape') editingId = null;
+  }
+
+  // Initial fetch + 5-second poll + load saved order
   $effect(() => {
+    displayOrder = loadOrder();
     fetchAccounts();
     const interval = setInterval(fetchAccounts, 5000);
     return () => clearInterval(interval);
@@ -146,13 +285,48 @@
     <p class="hint">Run <code>csq login 1</code> to add your first account.</p>
   </div>
 {:else}
+  <div class="sort-control">
+    <button
+      class="sort-pill"
+      class:active={sortMode === 'custom'}
+      onclick={() => setSortMode('custom')}
+    >custom</button>
+    <button
+      class="sort-pill"
+      class:active={sortMode === '5h'}
+      onclick={() => setSortMode('5h')}
+    >5h reset</button>
+    <button
+      class="sort-pill"
+      class:active={sortMode === '7d'}
+      onclick={() => setSortMode('7d')}
+    >7d reset</button>
+  </div>
   <div class="account-list">
-    {#each accounts as account (account.id)}
-      <div class="account-card" class:no-creds={!account.has_credentials}>
+    {#each displayedAccounts as account, idx (account.id)}
+      <div class="account-card" class:no-creds={!account.has_credentials} class:just-moved={justMovedId === account.id}>
+        {#if sortMode === 'custom'}
+          <div class="move-btns">
+            <button class="move-btn" onclick={() => moveCard(idx, -1)} disabled={idx === 0} title="Move up">▲</button>
+            <button class="move-btn" onclick={() => moveCard(idx, 1)} disabled={idx === displayedAccounts.length - 1} title="Move down">▼</button>
+          </div>
+        {/if}
         <button class="card-body" onclick={() => handleSwap(account.id)}>
           <div class="account-header">
             <span class="account-id">#{account.id}</span>
-            <span class="account-label">{account.label}</span>
+            {#if editingId === account.id}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="rename-input"
+                bind:value={editValue}
+                onkeydown={(e) => handleRenameKeydown(e, account.id)}
+                onblur={() => saveRename(account.id)}
+                autofocus
+                onclick={(e) => e.stopPropagation()}
+              />
+            {:else}
+              <span class="account-label" ondblclick={(e) => startRename(account, e)} title="Double-click to rename">{account.label}</span>
+            {/if}
             <TokenBadge status={account.token_status} expiresSecs={account.expires_in_secs} />
           </div>
           {#if account.last_refresh_error}
@@ -164,6 +338,26 @@
             <UsageBar label="5h" pct={account.five_hour_pct} />
             <UsageBar label="7d" pct={account.seven_day_pct} />
           </div>
+          {#if account.five_hour_resets_in || account.seven_day_resets_in}
+            <div class="reset-info">
+              {#if account.five_hour_resets_in}
+                <span>
+                  5h resets in {formatResetTime(account.five_hour_resets_in)}
+                  {#if soonest5hId === account.id}
+                    <span class="next-badge">next</span>
+                  {/if}
+                </span>
+              {/if}
+              {#if account.seven_day_resets_in}
+                <span>
+                  7d resets in {formatResetTime(account.seven_day_resets_in)}
+                  {#if soonest7dId === account.id}
+                    <span class="next-badge">next</span>
+                  {/if}
+                </span>
+              {/if}
+            </div>
+          {/if}
         </button>
         {#if account.token_status === 'expired' || account.token_status === 'missing' || account.last_refresh_error}
           <button
@@ -195,6 +389,46 @@
 />
 
 <style>
+  .sort-control {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 0.5rem;
+  }
+  .sort-pill {
+    padding: 0.2rem 0.55rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-tertiary);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    line-height: 1.4;
+  }
+  .sort-pill:hover {
+    border-color: var(--text-secondary);
+    color: var(--text-secondary);
+  }
+  .sort-pill.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-low);
+  }
+  .next-badge {
+    display: inline-block;
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 0 0.32em;
+    line-height: 1.5;
+    vertical-align: middle;
+    margin-left: 0.25em;
+    opacity: 0.85;
+  }
   .account-list { display: flex; flex-direction: column; gap: 0.5rem; }
   .account-card {
     display: flex;
@@ -205,8 +439,36 @@
     transition: border-color 0.15s;
     overflow: hidden;
   }
+  .account-card { position: relative; }
   .account-card:hover { border-color: var(--accent); }
   .account-card.no-creds { opacity: 0.5; }
+  .account-card.just-moved {
+    border-color: var(--accent);
+    transition: border-color 0.3s;
+  }
+  .move-btns {
+    position: absolute;
+    right: 0.4rem;
+    bottom: 0.4rem;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 2;
+  }
+  .account-card:hover .move-btns { opacity: 1; }
+  .move-btn {
+    background: var(--bg-tertiary);
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.55rem;
+    padding: 0.15rem 0.25rem;
+    cursor: pointer;
+    border-radius: 2px;
+    line-height: 1;
+  }
+  .move-btn:hover { color: var(--accent); }
+  .move-btn:disabled { opacity: 0.2; cursor: default; }
   .card-body {
     display: flex;
     flex-direction: column;
@@ -242,7 +504,18 @@
     gap: 0.5rem;
   }
   .account-id { font-weight: 700; font-size: 0.85rem; color: var(--text-secondary); }
-  .account-label { flex: 1; font-weight: 500; }
+  .account-label { flex: 1; font-weight: 500; cursor: text; }
+  .rename-input {
+    flex: 1;
+    font: inherit;
+    font-weight: 500;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 0.1rem 0.3rem;
+    color: inherit;
+    outline: none;
+  }
   .refresh-error {
     font-size: 0.72rem;
     color: var(--red);
@@ -250,6 +523,14 @@
     margin-top: -0.15rem;
   }
   .usage-bars { display: flex; gap: 1rem; }
+  .reset-info {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.68rem;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    margin-top: -0.1rem;
+  }
   .loading, .error, .empty { padding: 2rem; text-align: center; }
   .error { color: var(--red); }
   .hint { font-size: 0.85rem; color: var(--text-secondary); }

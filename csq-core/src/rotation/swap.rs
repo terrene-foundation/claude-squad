@@ -54,7 +54,35 @@ pub fn swap_to(
     let lock_path = canonical_path.with_extension("refresh-lock");
     let _guard = lock::lock_file(&lock_path)?;
 
-    let creds = credentials::load(&canonical_path)?;
+    let mut creds = credentials::load(&canonical_path)?;
+
+    // Guard: if the canonical credentials lack subscriptionType (e.g.
+    // freshly exchanged, CC hasn't backfilled yet), try to preserve
+    // the value from the existing live credentials. Without this,
+    // swapping to such an account causes CC to lose its Max tier and
+    // fall back to Sonnet — the "subscription contamination" bug.
+    if creds.claude_ai_oauth.subscription_type.is_none() {
+        let live_path_check = config_dir.join(".credentials.json");
+        if let Ok(existing) = credentials::load(&live_path_check) {
+            if existing.claude_ai_oauth.subscription_type.is_some() {
+                warn!(
+                    account = %target,
+                    "canonical credentials missing subscriptionType; \
+                     preserving from existing live credentials"
+                );
+                creds.claude_ai_oauth.subscription_type =
+                    existing.claude_ai_oauth.subscription_type.clone();
+                creds.claude_ai_oauth.rate_limit_tier =
+                    existing.claude_ai_oauth.rate_limit_tier.clone();
+            } else {
+                warn!(
+                    account = %target,
+                    "canonical credentials missing subscriptionType and no \
+                     fallback available — CC may default to Sonnet"
+                );
+            }
+        }
+    }
 
     let live_path = config_dir.join(".credentials.json");
     credentials::save(&live_path, &creds)?;
@@ -82,8 +110,10 @@ pub fn swap_to(
     markers::write_csq_account(config_dir, target)?;
     markers::write_current_account(config_dir, target)?;
 
-    // Best-effort keychain write
-    credentials::keychain::write(config_dir, &creds);
+    // Keychain write removed — file-based credentials are the
+    // source of truth. Writing to the keychain on every swap
+    // triggers macOS keychain authorization prompts for unsigned
+    // debug builds (each rebuild changes the binary hash).
 
     debug!(account = %target, "swap complete");
     Ok(SwapResult {

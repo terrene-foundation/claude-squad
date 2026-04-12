@@ -11,9 +11,28 @@ use std::path::Path;
 use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 
-/// Keychain account parameter (matches CC's usage).
+/// Keychain account parameter. CC uses the system username.
+/// macOS GUI apps don't inherit $USER, so we use libc getpwuid.
 #[cfg(target_os = "macos")]
-const KEYCHAIN_ACCOUNT: &str = "credentials";
+fn keychain_account() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .or_else(|_| {
+            // POSIX fallback for GUI apps that don't have $USER
+            unsafe {
+                let uid = libc::getuid();
+                let pw = libc::getpwuid(uid);
+                if pw.is_null() {
+                    return Err(std::env::VarError::NotPresent);
+                }
+                let name = std::ffi::CStr::from_ptr((*pw).pw_name);
+                name.to_str()
+                    .map(|s| s.to_string())
+                    .map_err(|_| std::env::VarError::NotPresent)
+            }
+        })
+        .unwrap_or_else(|_| "credentials".to_string())
+}
 
 /// Derives the keychain service name for a given CC config directory.
 ///
@@ -82,28 +101,44 @@ fn write_impl(service: &str, creds: &CredentialFile) -> Result<(), PlatformError
 
     // Delete first to handle the "already exists" case (equivalent to `security -U`).
     // Ignore the error: if the entry doesn't exist, the delete is a no-op.
-    let _ = delete_generic_password(service, KEYCHAIN_ACCOUNT);
+    let _ = delete_generic_password(service, &keychain_account());
 
-    set_generic_password(service, KEYCHAIN_ACCOUNT, hex_payload.as_bytes())
+    set_generic_password(service, &keychain_account(), hex_payload.as_bytes())
         .map_err(|e| PlatformError::Keychain(format!("keychain write: {e}")))?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn read_impl(service: &str) -> Result<CredentialFile, PlatformError> {
-    use security_framework::passwords::get_generic_password;
+    // Use the `security` CLI tool instead of security-framework crate.
+    // The CLI tool is already trusted by macOS and doesn't trigger
+    // per-binary keychain authorization prompts (which fire on every
+    // debug rebuild since the binary hash changes).
+    let account = keychain_account();
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", service, "-a", &account, "-w"])
+        .output()
+        .map_err(|e| PlatformError::Keychain(format!("security command: {e}")))?;
 
-    let password_bytes = get_generic_password(service, KEYCHAIN_ACCOUNT)
-        .map_err(|e| PlatformError::Keychain(format!("keychain read: {e}")))?;
+    if !output.status.success() {
+        return Err(PlatformError::Keychain(
+            "keychain entry not found".to_string(),
+        ));
+    }
 
-    let hex_payload = String::from_utf8(password_bytes)
+    let raw = String::from_utf8(output.stdout)
         .map_err(|e| PlatformError::Keychain(format!("utf8: {e}")))?;
-    let hex_payload = hex_payload.trim();
+    let raw = raw.trim();
 
-    let bytes = hex::decode(hex_payload)
-        .map_err(|e| PlatformError::Keychain(format!("hex decode: {e}")))?;
-    let json =
-        String::from_utf8(bytes).map_err(|e| PlatformError::Keychain(format!("utf8: {e}")))?;
+    // CC writes raw JSON; older csq versions wrote hex-encoded JSON.
+    // Try raw JSON first, fall back to hex-decode.
+    let json = if raw.starts_with('{') {
+        raw.to_string()
+    } else {
+        let bytes =
+            hex::decode(raw).map_err(|e| PlatformError::Keychain(format!("hex decode: {e}")))?;
+        String::from_utf8(bytes).map_err(|e| PlatformError::Keychain(format!("utf8: {e}")))?
+    };
 
     serde_json::from_str(&json).map_err(|e| PlatformError::Keychain(format!("json parse: {e}")))
 }

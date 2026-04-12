@@ -109,6 +109,34 @@ pub fn profiles_path(base_dir: &Path) -> std::path::PathBuf {
     base_dir.join("profiles.json")
 }
 
+/// Updates the display label (email) for an account. Creates the
+/// profile entry if it doesn't exist.
+pub fn update_email(
+    base_dir: &Path,
+    account: crate::types::AccountNum,
+    new_label: &str,
+) -> Result<(), ConfigError> {
+    let path = profiles_path(base_dir);
+    let mut profiles = load(&path)?;
+
+    let key = account.get().to_string();
+    match profiles.accounts.get_mut(&key) {
+        Some(entry) => entry.email = new_label.to_string(),
+        None => {
+            profiles.set_profile(
+                account.get(),
+                AccountProfile {
+                    email: new_label.to_string(),
+                    method: "oauth".to_string(),
+                    extra: std::collections::HashMap::new(),
+                },
+            );
+        }
+    }
+
+    save(&path, &profiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

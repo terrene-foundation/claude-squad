@@ -433,7 +433,7 @@ async fn oauth_exchange_handler(
             &code,
             &verifier,
             PASTE_CODE_REDIRECT_URI,
-            crate::http::post_json,
+            crate::http::post_form_params,
         )
     })
     .await;
@@ -1440,8 +1440,39 @@ mod tests {
         // verify the store length here — the actual exchange
         // failure mode is covered by the csq_core::oauth::exchange
         // unit tests.
-        let real_body = format!(r#"{{"state":"{state_token}","code":"some-code"}}"#);
-        let _ = http_post_json(&sock, "/api/oauth/exchange", &real_body).await;
+        //
+        // IMPORTANT: We send the request but do NOT wait for the
+        // full HTTP response. The exchange handler calls Anthropic's
+        // real token endpoint (no mock injected), which either
+        // times out or returns an error. Waiting for that response
+        // causes the test to time out at the 2s deadline in
+        // http_post_json. Instead, we send the request over the
+        // Unix socket and give the handler enough time to consume
+        // the state entry (which happens BEFORE the HTTP call).
+        {
+            use tokio::io::AsyncWriteExt;
+            use tokio::net::UnixStream;
+
+            let real_body = format!(r#"{{"state":"{state_token}","code":"some-code"}}"#);
+            let req = format!(
+                "POST /api/oauth/exchange HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {len}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                len = real_body.len(),
+                body = real_body,
+            );
+            let mut stream = UnixStream::connect(&sock).await.unwrap();
+            stream.write_all(req.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+            // Give the handler time to parse the request and consume
+            // the state entry. The consume call is synchronous and
+            // happens before spawn_blocking, so 200ms is generous.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Drop the stream — we don't need the response.
+        }
+
         assert_eq!(
             store.len(),
             0,
@@ -1449,7 +1480,7 @@ mod tests {
         );
 
         handle.shutdown();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), join).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), join).await;
     }
 
     #[tokio::test]

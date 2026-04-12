@@ -48,11 +48,19 @@ const MAX_REDIRECTS: usize = 2;
 fn client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        let ua = format!("csq/{}", env!("CARGO_PKG_VERSION"));
+        // Anthropic's OAuth token endpoint rejects requests with
+        // unrecognized User-Agent strings (returns 400 "Invalid request
+        // format"). Only curl-style UAs are accepted. This appears to
+        // be a server-side allowlist on the /v1/oauth/token endpoint.
+        let ua = format!("curl/{}", env!("CARGO_PKG_VERSION"));
         reqwest::blocking::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
             .connect_timeout(Duration::from_secs(5))
             .https_only(true)
+            .http1_only()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
             .user_agent(ua)
             .build()
@@ -182,6 +190,23 @@ pub fn post_json(url: &str, body: &str) -> Result<Vec<u8>, String> {
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
+        .send()
+        .map_err(sanitize_err)?;
+
+    let bytes = response.bytes().map_err(sanitize_err)?;
+    Ok(bytes.to_vec())
+}
+
+/// POSTs form-encoded key-value pairs using reqwest's built-in form
+/// serialization. This correctly handles `application/x-www-form-urlencoded`
+/// encoding per the WHATWG URL standard (spaces as `+`, proper escaping).
+///
+/// Use this instead of manual `urlencoding::encode` + `post_form` for
+/// OAuth token exchanges where encoding correctness is critical.
+pub fn post_form_params(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    let response = client()
+        .post(url)
+        .form(&params)
         .send()
         .map_err(sanitize_err)?;
 

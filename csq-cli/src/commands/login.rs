@@ -38,6 +38,7 @@ use csq_core::daemon::{self, DaemonClientError, DetectResult};
 
 /// How often the CLI polls the canonical credential file while
 /// waiting for the daemon's callback handler to write it.
+#[cfg(unix)]
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Cap on the total daemon-path wait time. The daemon's state store
@@ -45,23 +46,21 @@ const POLL_INTERVAL: Duration = Duration::from_millis(750);
 /// minutes), but we also bound the CLI wait so a user who walked
 /// away from their browser still gets a clear error instead of an
 /// indefinite spinner. 5 minutes matches the state TTL.
+#[cfg(unix)]
 const DAEMON_WAIT_CAP: Duration = Duration::from_secs(300);
 
 /// Entry point invoked from `main.rs`. Tries the daemon-delegated
-/// path first and falls back to the direct path on failure.
+/// path first (Unix only), falling back to `claude auth login` when
+/// the daemon is not running or not reachable.
 pub fn handle(base_dir: &Path, account: AccountNum) -> Result<()> {
     #[cfg(unix)]
-    {
-        match try_daemon_path(base_dir, account) {
-            DaemonPathOutcome::Succeeded => return Ok(()),
-            DaemonPathOutcome::Fallback(reason) => {
-                eprintln!("note: {reason}");
-                eprintln!("      falling back to direct `claude auth login`.");
-            }
-            DaemonPathOutcome::Failed(e) => return Err(e),
+    match try_daemon_path(base_dir, account) {
+        DaemonPathOutcome::Succeeded => return Ok(()),
+        DaemonPathOutcome::Fallback(reason) => {
+            eprintln!("note: {reason}; falling back to direct login");
         }
+        DaemonPathOutcome::Failed(e) => return Err(e),
     }
-
     handle_direct(base_dir, account)
 }
 
@@ -243,6 +242,7 @@ fn parse_login_response(body: &str) -> Result<DaemonLoginRequest> {
 /// tokens. It never contains shell metacharacters that could escape
 /// an argv. Even so, we pass the URL as a single `arg()` entry, not
 /// via a shell string, so no shell parsing is involved.
+#[cfg(unix)]
 fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = {

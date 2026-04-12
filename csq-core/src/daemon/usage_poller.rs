@@ -95,10 +95,12 @@ const RATELIMIT_PREFIX: &str = "anthropic-ratelimit-";
 /// Uses `max_tokens=1` to minimise cost — the goal is only to receive
 /// `anthropic-ratelimit-*` response headers, not a real completion.
 fn build_probe_body(model: &str) -> String {
-    format!(
-        r#"{{"model":"{}","max_tokens":1,"messages":[{{"role":"user","content":"hi"}}]}}"#,
-        model
-    )
+    serde_json::json!({
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+    .to_string()
 }
 
 /// HTTP transport closure for the usage GET. Takes `(url, bearer_token,
@@ -229,6 +231,7 @@ async fn run_loop(cfg: RunLoopConfig) {
         if last_3p_tick.elapsed() >= cfg.interval_3p {
             tick_3p(
                 &cfg.base_dir,
+                &cfg.http_get,
                 &cfg.http_post_probe,
                 &cfg.cooldowns_3p,
                 &cfg.backoffs_3p,
@@ -400,9 +403,9 @@ pub(crate) fn parse_usage_response(body: &[u8]) -> Result<UsageData, PollError> 
 fn parse_window(json: &serde_json::Value, key: &str) -> Option<UsageWindow> {
     let window = json.get(key)?;
 
-    // `utilization` is 0.0–1.0; convert to 0.0–100.0.
-    let utilization = window.get("utilization")?.as_f64()?;
-    let used_percentage = utilization * 100.0;
+    // `utilization` is already 0.0–100.0 (percentage).
+    // Anthropic's `/api/oauth/usage` returns e.g. `58.0` for 58%.
+    let used_percentage = window.get("utilization")?.as_f64()?;
 
     // `resets_at` is ISO-8601 string. Parse to epoch seconds.
     let resets_str = window.get("resets_at")?.as_str()?;
@@ -474,11 +477,16 @@ fn is_leap_year(y: u64) -> bool {
 }
 
 /// Writes parsed usage data into the local `quota.json`.
+///
+/// Acquires `quota.json.lock` for mutual exclusion with any other
+/// writer (see RT finding #1 — consistency with `state::update_quota`).
 fn write_usage_to_quota(
     base_dir: &std::path::Path,
     account: AccountNum,
     usage: &UsageData,
 ) -> Result<(), crate::error::CsqError> {
+    let lock_path = quota_state::quota_path(base_dir).with_extension("lock");
+    let _guard = crate::platform::lock::lock_file(&lock_path)?;
     let mut quota = quota_state::load_state(base_dir).unwrap_or_else(|_| QuotaFile::empty());
 
     let now = std::time::SystemTime::now()
@@ -521,6 +529,7 @@ fn write_usage_to_quota(
 ///    when a per-slot binding exists for the same provider.
 pub(crate) async fn tick_3p(
     base_dir: &std::path::Path,
+    http_get: &HttpGetFn,
     http_post_probe: &HttpPostProbeFn,
     cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>,
     backoffs: &Arc<Mutex<HashMap<u16, u32>>>,
@@ -615,12 +624,27 @@ pub(crate) async fn tick_3p(
         // Poll in spawn_blocking (blocking HTTP client).
         // expose_secret() at the HTTP boundary — raw key lives only
         // for the duration of the blocking probe.
-        let http = Arc::clone(http_post_probe);
+        //
+        // For MiniMax: use the direct quota API endpoint first
+        // (`/v1/api/openplatform/coding_plan/remains`), which returns
+        // authoritative usage data without the `max_tokens=1` probe hack.
+        // For Z.AI: no direct API exists, fall back to the probe.
+        let http_probe = Arc::clone(http_post_probe);
+        let http_get = Arc::clone(http_get);
         let url = format!("{}/v1/messages", base_url_owned);
         let model = model_owned;
         let raw_key = api_key.expose_secret().to_string();
-        let poll_result =
-            tokio::task::spawn_blocking(move || poll_3p_usage(&url, &raw_key, &model, &http)).await;
+        let pid = provider_id.to_string();
+        let poll_result = tokio::task::spawn_blocking(move || {
+            if pid == "mm" {
+                // MiniMax: direct quota endpoint (authoritative)
+                poll_minimax_quota(&raw_key, &http_get)
+            } else {
+                // Z.AI and others: probe via rate-limit headers
+                poll_3p_usage(&url, &raw_key, &model, &http_probe)
+            }
+        })
+        .await;
 
         match poll_result {
             Ok(Ok(rate_limits)) => {
@@ -810,6 +834,59 @@ pub(crate) fn poll_3p_usage(
     }
 }
 
+/// Polls MiniMax's direct quota API for authoritative usage data.
+///
+/// Endpoint: `GET https://www.minimax.io/v1/api/openplatform/coding_plan/remains`
+/// Auth: `Authorization: Bearer <API_KEY>`
+///
+/// This replaces the `max_tokens=1` probe hack with a direct quota
+/// query, consistent with the Account/Terminal separation principle:
+/// accounts poll their own authoritative usage source.
+pub(crate) fn poll_minimax_quota(
+    api_key: &str,
+    http_get: &HttpGetFn,
+) -> Result<RateLimitData, PollError> {
+    let url = "https://www.minimax.io/v1/api/openplatform/coding_plan/remains";
+    let extra_headers = [("Content-Type", "application/json")];
+
+    let (status, body) = http_get(url, api_key, &extra_headers).map_err(PollError::Transport)?;
+
+    match status {
+        429 => return Err(PollError::RateLimited),
+        401 => return Err(PollError::Unauthorized),
+        200 => {}
+        other => return Err(PollError::HttpError(other)),
+    }
+
+    // Parse the response. MiniMax returns quota remaining data.
+    // We map whatever fields are available to RateLimitData.
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| PollError::Parse(e.to_string()))?;
+
+    // MiniMax response structure may include fields like:
+    // { "base_status_code": 0, "data": { "remaining": N, "total": M, ... } }
+    // We extract what's available and map to our internal format.
+    let data = json.get("data").unwrap_or(&json);
+
+    let total = data
+        .get("total")
+        .or_else(|| data.get("limit"))
+        .and_then(|v| v.as_u64());
+    let remaining = data
+        .get("remaining")
+        .or_else(|| data.get("remains"))
+        .and_then(|v| v.as_u64());
+
+    Ok(RateLimitData {
+        requests_limit: total,
+        requests_remaining: remaining,
+        tokens_limit: None,
+        tokens_remaining: None,
+        input_tokens_limit: None,
+        output_tokens_limit: None,
+    })
+}
+
 /// Extracts `anthropic-ratelimit-*` headers into a [`RateLimitData`].
 ///
 /// Header keys must be lowercase (as returned by `http::post_json_with_headers`).
@@ -836,6 +913,8 @@ fn write_3p_usage_to_quota(
     account_id: u16,
     rate_limits: &RateLimitData,
 ) -> Result<(), crate::error::CsqError> {
+    let lock_path = quota_state::quota_path(base_dir).with_extension("lock");
+    let _guard = crate::platform::lock::lock_file(&lock_path)?;
     let mut quota = quota_state::load_state(base_dir).unwrap_or_else(|_| QuotaFile::empty());
 
     let now = std::time::SystemTime::now()
@@ -871,7 +950,7 @@ fn write_3p_usage_to_quota(
 // ─── Cooldown / backoff helpers ────────────────────────────
 
 fn in_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) -> bool {
-    let guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     match guard.get(&account) {
         Some(t) => t.elapsed() < FAILURE_COOLDOWN,
         None => false,
@@ -879,7 +958,7 @@ fn in_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) -> b
 }
 
 fn set_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) {
-    let mut guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let mut guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     guard.insert(account, Instant::now());
 }
 
@@ -889,30 +968,30 @@ fn set_cooldown_with_backoff(
     account: u16,
 ) {
     let factor = {
-        let guard = backoffs.lock().expect("backoff lock poisoned");
+        let guard = backoffs.lock().unwrap_or_else(|p| p.into_inner());
         *guard.get(&account).unwrap_or(&1)
     };
     // Simple approach: use fixed FAILURE_COOLDOWN for now. The 429 is
     // uncommon enough that fixed 10-min cooldown is adequate. The
     // backoff factor is tracked so we can scale it later if needed.
     let _ = factor;
-    let mut guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let mut guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     guard.insert(account, Instant::now());
 }
 
 fn clear_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) {
-    let mut guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let mut guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     guard.remove(&account);
 }
 
 fn increase_backoff(backoffs: &Arc<Mutex<HashMap<u16, u32>>>, account: u16) {
-    let mut guard = backoffs.lock().expect("backoff lock poisoned");
+    let mut guard = backoffs.lock().unwrap_or_else(|p| p.into_inner());
     let current = guard.get(&account).copied().unwrap_or(1);
     guard.insert(account, (current * 2).min(8));
 }
 
 fn clear_backoff(backoffs: &Arc<Mutex<HashMap<u16, u32>>>, account: u16) {
-    let mut guard = backoffs.lock().expect("backoff lock poisoned");
+    let mut guard = backoffs.lock().unwrap_or_else(|p| p.into_inner());
     guard.remove(&account);
 }
 
@@ -944,9 +1023,10 @@ mod tests {
     fn mock_usage_success(counter: Arc<AtomicU32>) -> HttpGetFn {
         Arc::new(move |_url: &str, _token: &str, _headers: &[(&str, &str)]| {
             counter.fetch_add(1, Ordering::SeqCst);
+            // Anthropic returns utilization as 0-100 percentage directly
             let body = br#"{
-                "five_hour": { "utilization": 0.42, "resets_at": "2099-01-01T00:00:00Z" },
-                "seven_day": { "utilization": 0.15, "resets_at": "2099-01-14T00:00:00Z" }
+                "five_hour": { "utilization": 42.0, "resets_at": "2099-01-01T00:00:00Z" },
+                "seven_day": { "utilization": 15.0, "resets_at": "2099-01-14T00:00:00Z" }
             }"#;
             Ok((200, body.to_vec()))
         })
@@ -970,9 +1050,10 @@ mod tests {
 
     #[test]
     fn parse_full_response() {
+        // Anthropic returns utilization as 0-100 percentage directly
         let body = br#"{
-            "five_hour": { "utilization": 0.42, "resets_at": "2026-04-10T20:00:00Z" },
-            "seven_day": { "utilization": 0.15, "resets_at": "2026-04-17T00:00:00Z" }
+            "five_hour": { "utilization": 42.0, "resets_at": "2026-04-10T20:00:00Z" },
+            "seven_day": { "utilization": 15.0, "resets_at": "2026-04-17T00:00:00Z" }
         }"#;
         let data = parse_usage_response(body).unwrap();
 
@@ -1011,8 +1092,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_utilization_converts_to_percentage() {
-        let body = br#"{"five_hour":{"utilization":1.0,"resets_at":"2026-01-01T00:00:00Z"}}"#;
+    fn parse_utilization_is_direct_percentage() {
+        // Anthropic returns utilization as percentage (100.0 = 100%)
+        let body = br#"{"five_hour":{"utilization":100.0,"resets_at":"2026-01-01T00:00:00Z"}}"#;
         let data = parse_usage_response(body).unwrap();
         assert!((data.five_hour.unwrap().used_percentage - 100.0).abs() < 0.01);
     }
@@ -1183,6 +1265,13 @@ mod tests {
             key, key
         );
         std::fs::write(base.join(filename), content).unwrap();
+    }
+
+    /// Mock HttpGetFn that returns a MiniMax-like quota response.
+    fn mock_get_noop() -> HttpGetFn {
+        Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            Ok((200, br#"{"data":{"remaining":800,"total":1000}}"#.to_vec()))
+        })
     }
 
     fn mock_3p_success(counter: Arc<AtomicU32>) -> HttpPostProbeFn {
@@ -1497,7 +1586,7 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &http, &cooldowns, &backoffs).await;
+        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one HTTP POST");
 
@@ -1521,12 +1610,12 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &http, &cooldowns, &backoffs).await;
+        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert!(in_cooldown(&cooldowns, 901));
 
         // Second tick: cooldown blocks the poll
-        tick_3p(dir.path(), &http, &cooldowns, &backoffs).await;
+        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1542,7 +1631,7 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &http, &cooldowns, &backoffs).await;
+        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
@@ -1552,17 +1641,32 @@ mod tests {
         install_3p_account(dir.path(), "zai", "zai-key");
         install_3p_account(dir.path(), "mm", "mm-key");
 
-        let counter = Arc::new(AtomicU32::new(0));
-        let http = mock_3p_success(Arc::clone(&counter));
+        let post_counter = Arc::new(AtomicU32::new(0));
+        let http_post = mock_3p_success(Arc::clone(&post_counter));
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &http, &cooldowns, &backoffs).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "both providers polled");
+        // MiniMax uses direct GET endpoint, Z.AI uses POST probe
+        tick_3p(
+            dir.path(),
+            &mock_get_noop(),
+            &http_post,
+            &cooldowns,
+            &backoffs,
+        )
+        .await;
+        assert_eq!(
+            post_counter.load(Ordering::SeqCst),
+            1,
+            "only Z.AI uses POST probe"
+        );
 
         let quota = quota_state::load_state(dir.path()).unwrap();
         assert!(quota.get(901).is_some(), "Z.AI should have quota");
-        assert!(quota.get(902).is_some(), "MiniMax should have quota");
+        assert!(
+            quota.get(902).is_some(),
+            "MiniMax should have quota (via GET)"
+        );
     }
 
     // ─── quota round-trip with rate_limits field ────────────

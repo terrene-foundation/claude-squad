@@ -370,7 +370,7 @@ pub(crate) async fn tick(
 use crate::error::error_kind_tag;
 
 fn in_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) -> bool {
-    let guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     match guard.get(&account) {
         Some(t) => t.elapsed() < FAILURE_COOLDOWN,
         None => false,
@@ -378,12 +378,12 @@ fn in_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) -> b
 }
 
 fn set_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) {
-    let mut guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let mut guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     guard.insert(account, Instant::now());
 }
 
 fn clear_cooldown(cooldowns: &Arc<Mutex<HashMap<u16, Instant>>>, account: u16) {
-    let mut guard = cooldowns.lock().expect("cooldown lock poisoned");
+    let mut guard = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
     guard.remove(&account);
 }
 

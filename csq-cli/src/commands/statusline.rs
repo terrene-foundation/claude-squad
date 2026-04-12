@@ -1,12 +1,22 @@
-//! `csq statusline` — reads CC JSON from stdin, updates quota, outputs formatted statusline.
+//! `csq statusline` — reads CC JSON from stdin, runs snapshot + sync,
+//! and outputs the formatted statusline.
+//!
+//! ## Account/Terminal Separation
+//!
+//! This command is a TERMINAL operation. It reads and displays account
+//! quota data but NEVER writes it. Quota data is written exclusively
+//! by the daemon's usage poller, which polls Anthropic's `/api/oauth/usage`
+//! endpoint directly per account.
+//!
+//! See `rules/account-terminal-separation.md` for the full spec.
 
 use anyhow::Result;
-use csq_core::accounts::markers;
-use csq_core::broker::fanout::is_broker_failed;
-use csq_core::quota::{
-    format::{account_label, is_swap_stuck, should_report_broker_failed, statusline_str},
-    state,
+use csq_core::accounts::{markers, snapshot};
+use csq_core::broker::{fanout::is_broker_failed, sync};
+use csq_core::quota::format::{
+    account_label, is_swap_stuck, should_report_broker_failed, statusline_str,
 };
+use csq_core::quota::state;
 use csq_core::types::AccountNum;
 use std::io::Read;
 use std::path::Path;
@@ -16,18 +26,28 @@ use std::path::Path;
 const MAX_STDIN: u64 = 65_536;
 
 pub fn handle(base_dir: &Path) -> Result<()> {
-    let config_dir = super::current_config_dir();
+    let config_dir = match super::current_config_dir() {
+        Some(d) => d,
+        None => {
+            println!("csq: no config dir");
+            return Ok(());
+        }
+    };
 
-    // Read CC's JSON from stdin with a hard size limit
-    let mut stdin_json = String::new();
-    let _ = std::io::stdin()
-        .take(MAX_STDIN)
-        .read_to_string(&mut stdin_json);
+    // Drain stdin so CC doesn't get a broken pipe.
+    // We no longer use the JSON payload for quota updates —
+    // that's the daemon's job via Anthropic's usage API.
+    let mut sink = String::new();
+    let _ = std::io::stdin().take(MAX_STDIN).read_to_string(&mut sink);
+    drop(sink);
 
-    // Determine active account
-    let account: AccountNum = match config_dir
-        .as_deref()
-        .and_then(markers::read_current_account)
+    // ── Snapshot: identify which account CC is running ──
+    let _ = snapshot::snapshot_account(&config_dir, base_dir);
+
+    // Determine active account from snapshot result (.current-account),
+    // falling back to .csq-account marker.
+    let account: AccountNum = match markers::read_current_account(&config_dir)
+        .or_else(|| markers::read_csq_account(&config_dir))
     {
         Some(a) => a,
         None => {
@@ -36,19 +56,13 @@ pub fn handle(base_dir: &Path) -> Result<()> {
         }
     };
 
-    let config_dir = config_dir.unwrap();
+    // ── Sync: backsync (live→canonical) + pullsync (canonical→live) ──
+    // Best-effort, never blocks the statusline render.
+    let _ = sync::backsync(&config_dir, base_dir);
+    let _ = sync::pullsync(&config_dir, base_dir);
 
-    // Update quota from CC's rate_limits payload (if present and parseable)
-    if !stdin_json.trim().is_empty() {
-        if let Ok(cc_payload) = serde_json::from_str::<serde_json::Value>(&stdin_json) {
-            if let Some(rate_limits) = cc_payload.get("rate_limits") {
-                // Best-effort — never block statusline render on quota errors
-                let _ = state::update_quota(base_dir, &config_dir, account, rate_limits);
-            }
-        }
-    }
-
-    // Load state after (possibly) updating
+    // ── Render statusline (read-only from quota.json) ──
+    // Quota data is written ONLY by the daemon's usage poller.
     let quota = state::load_state(base_dir).unwrap_or_else(|_| csq_core::quota::QuotaFile::empty());
     let account_quota = quota.get(account.get());
 

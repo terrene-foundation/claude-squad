@@ -34,19 +34,12 @@
 
   // ── Local state ───────────────────────────────────────────
   //
-  // The Claude OAuth flow is paste-code: we open the authorize URL
-  // in the system browser, the user authorizes on Anthropic's page,
-  // Anthropic shows them a code, and they paste it back into the
-  // `paste-code` step below.
+  // Login flow: for Anthropic accounts, we run `claude auth login`
+  // which handles the full OAuth flow (browser, callback, exchange).
+  // The modal shows a spinner while it runs.
   type Step =
     | { kind: 'picker' }
-    | {
-        kind: 'paste-code';
-        login: ClaudeLoginView;
-        code: string;
-        submitting: boolean;
-        error: string | null;
-      }
+    | { kind: 'logging-in'; account: number }
     | {
         kind: 'bearer-form';
         provider: ProviderView;
@@ -61,9 +54,7 @@
   let providers = $state<ProviderView[]>([]);
   let providersError = $state<string | null>(null);
 
-  // Tracked so cleanup can cancel an in-flight login no matter which
-  // step the modal is on when the user dismisses it.
-  let pendingStateToken: string | null = null;
+  // No longer needed — login is a single blocking command.
 
   // ── Provider fetch ────────────────────────────────────────
   async function loadProviders() {
@@ -81,8 +72,6 @@
     if (isOpen) {
       step = { kind: 'picker' };
       loadProviders();
-    } else {
-      cleanupPendingLogin();
     }
   });
 
@@ -109,98 +98,22 @@
     }
   }
 
-  // ── Claude OAuth (paste-code) ─────────────────────────────
+  // ── Claude OAuth (via `claude auth login`) ─────────────────
   async function startClaudeOAuth() {
-    try {
-      const login = await invoke<ClaudeLoginView>('start_claude_login', {
-        account: nextAccountId,
-      });
-      pendingStateToken = login.state;
-
-      // Open the authorize URL in the user's default browser. On
-      // macOS this calls `open <url>`, which opens the URL in the
-      // currently frontmost browser window if one is active (a new
-      // tab), or launches the default browser if none is running.
-      // Password managers and 2FA flows work here the way users
-      // expect.
-      //
-      // If the call fails (most commonly: missing `opener:default`
-      // capability, or no registered default browser), surface the
-      // error up-front so the user sees *why* nothing happened
-      // rather than staring at a waiting modal.
-      let openError: string | null = null;
-      try {
-        await openUrl(login.auth_url);
-      } catch (e) {
-        openError = String(e);
-      }
-
-      step = {
-        kind: 'paste-code',
-        login,
-        code: '',
-        submitting: false,
-        error: openError
-          ? `Could not open your browser automatically (${openError}). Copy the URL below and open it manually.`
-          : null,
-      };
-    } catch (e) {
-      step = { kind: 'error', message: String(e) };
-    }
-  }
-
-  async function copyAuthUrl() {
-    if (step.kind !== 'paste-code') return;
-    try {
-      await navigator.clipboard.writeText(step.login.auth_url);
-    } catch {
-      // Clipboard API may not be available in a webview context.
-      // Swallow — the URL is still visible in the textarea.
-    }
-  }
-
-  async function submitCode() {
-    if (step.kind !== 'paste-code') return;
-    const current = step;
-    if (!current.code.trim()) {
-      step = { ...current, error: 'Please paste the code from the sign-in page.' };
-      return;
-    }
-    step = { ...current, submitting: true, error: null };
+    step = { kind: 'logging-in', account: nextAccountId };
     try {
       const baseDir = await getBaseDir();
-      const account = await invoke<number>('submit_oauth_code', {
+      const account = await invoke<number>('start_claude_login', {
         baseDir,
-        stateToken: current.login.state,
-        code: current.code.trim(),
+        account: nextAccountId,
       });
-      pendingStateToken = null;
       onAccountAdded();
       step = {
         kind: 'success',
-        message: `Account ${account} added. You can close this dialog.`,
+        message: `Account ${account} added successfully.`,
       };
     } catch (e) {
-      step = { ...current, submitting: false, error: String(e) };
-    }
-  }
-
-  async function cancelOAuth() {
-    if (pendingStateToken) {
-      try {
-        await invoke('cancel_login', { stateToken: pendingStateToken });
-      } catch {
-        // The token may have expired or been consumed; either way
-        // the net effect is "gone", which is what cancel means.
-      }
-    }
-    pendingStateToken = null;
-    step = { kind: 'picker' };
-  }
-
-  async function cleanupPendingLogin() {
-    if (pendingStateToken) {
-      await cancelOAuth();
+      step = { kind: 'error', message: String(e) };
     }
   }
 
@@ -233,7 +146,6 @@
 
   // ── Close behavior ────────────────────────────────────────
   async function handleClose() {
-    await cleanupPendingLogin();
     onClose();
   }
 </script>
@@ -281,40 +193,14 @@
               </button>
             {/each}
           </div>
-        {:else if step.kind === 'paste-code'}
+        {:else if step.kind === 'logging-in'}
           <p class="lede">
-            Your browser should have opened to the Claude sign-in page. After you authorize,
-            Anthropic will show you a code — paste it below.
+            Signing in to account #{step.account}. Your browser should open — complete
+            the authorization there. This dialog will update automatically.
           </p>
-          {#if step.error}
-            <div class="error-banner">{step.error}</div>
-          {/if}
-          <details class="fallback">
-            <summary>Browser didn't open?</summary>
-            <p class="hint">Copy this URL and paste it into any browser:</p>
-            <textarea class="url-box" readonly rows="3">{step.login.auth_url}</textarea>
-            <div class="actions">
-              <button class="secondary" onclick={copyAuthUrl}>Copy URL</button>
-            </div>
-          </details>
-          <label class="field">
-            <span>Authorization code</span>
-            <input
-              type="text"
-              bind:value={step.code}
-              placeholder="Paste the code here"
-              disabled={step.submitting}
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-          <div class="actions">
-            <button class="secondary" onclick={cancelOAuth} disabled={step.submitting}>
-              Back
-            </button>
-            <button class="primary" onclick={submitCode} disabled={step.submitting}>
-              {step.submitting ? 'Finishing sign-in…' : 'Submit code'}
-            </button>
+          <div class="spinner-container">
+            <div class="spinner"></div>
+            <p class="hint">Waiting for browser authorization...</p>
           </div>
         {:else if step.kind === 'bearer-form'}
           <p class="lede">Paste your {step.provider.name} API key.</p>
@@ -455,6 +341,24 @@
     font-size: 0.75rem;
     color: var(--text-secondary);
     font-family: ui-monospace, monospace;
+  }
+  .spinner-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.5rem 0;
+  }
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent, #7c6ef0);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
   .field {
     display: flex;
