@@ -106,6 +106,12 @@ fn ensure_symlink(target: &Path, link: &Path) -> Result<(), std::io::Error> {
 
 /// Creates a symlink. On Unix uses `symlink`, on Windows uses a directory junction
 /// (via `mklink /J`) for directories, falling back to copy for files.
+///
+/// Public alias for use by `handle_dir` module.
+pub fn create_symlink_pub(target: &Path, link: &Path) -> Result<(), std::io::Error> {
+    create_symlink(target, link)
+}
+
 fn create_symlink(target: &Path, link: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {

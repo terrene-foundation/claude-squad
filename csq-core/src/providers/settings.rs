@@ -75,6 +75,32 @@ impl ProviderSettings {
         Ok(())
     }
 
+    /// Returns the MiniMax GroupId stored in this settings file.
+    ///
+    /// Stored in `env.MINIMAX_GROUP_ID` (the user's MiniMax org ID).
+    /// Required for the MiniMax quota API endpoint.
+    pub fn get_group_id(&self) -> Option<&str> {
+        self.settings
+            .get("env")
+            .and_then(|env| env.get("MINIMAX_GROUP_ID"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Sets the MiniMax GroupId in this settings file.
+    pub fn set_group_id(&mut self, group_id: &str) {
+        let obj = self.settings.as_object_mut().unwrap();
+        let env_obj = obj
+            .entry("env".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(env) = env_obj.as_object_mut() {
+            env.insert(
+                "MINIMAX_GROUP_ID".to_string(),
+                Value::String(group_id.to_string()),
+            );
+        }
+    }
+
     /// Sets the active model, updating all MODEL_KEYS.
     pub fn set_model(&mut self, model_id: &str) {
         self.settings = set_model(&self.settings, model_id);

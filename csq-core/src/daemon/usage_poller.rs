@@ -14,18 +14,18 @@
 //! Accept: application/json
 //! ```
 //!
-//! Response (observed from v1 Python poller + test fixtures):
+//! Response (observed from v1 Python poller + Playwright):
 //!
 //! ```json
 //! {
-//!   "five_hour": { "utilization": 0.42, "resets_at": "2099-01-01T00:00:00Z" },
-//!   "seven_day": { "utilization": 0.15, "resets_at": "2099-01-14T00:00:00Z" }
+//!   "five_hour": { "utilization": 42.0, "resets_at": "2099-01-01T00:00:00Z" },
+//!   "seven_day": { "utilization": 15.0, "resets_at": "2099-01-14T00:00:00Z" }
 //! }
 //! ```
 //!
 //! # Mapping to `QuotaFile`
 //!
-//! - `utilization` (0.0–1.0) → `used_percentage` (0.0–100.0): multiply by 100.
+//! - `utilization` is already 0–100 (percentage). Store directly as `used_percentage`.
 //! - `resets_at` (ISO-8601 string) → epoch `u64`: parse via a minimal
 //!   RFC 3339 parser (no chrono dependency).
 //!
@@ -61,6 +61,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+/// Per-call timeout for blocking HTTP requests. If a single
+/// `spawn_blocking` poll exceeds this, the call is abandoned and
+/// the account enters cooldown. Prevents the 2026-04-12 12:17 UTC
+/// hang where a stuck HTTP call blocked the entire poller.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default interval between poller ticks: 5 minutes.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(300);
@@ -159,7 +165,7 @@ pub fn spawn_with_config(
     shutdown: CancellationToken,
     interval: Duration,
     interval_3p: Duration,
-    startup_delay: Duration,
+    mut startup_delay: Duration,
 ) -> PollerHandle {
     let cooldowns: Arc<Mutex<HashMap<u16, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let backoffs: Arc<Mutex<HashMap<u16, u32>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -169,20 +175,55 @@ pub fn spawn_with_config(
     let backoffs_3p: Arc<Mutex<HashMap<u16, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let join = tokio::spawn(async move {
-        run_loop(RunLoopConfig {
-            base_dir,
-            http_get,
-            http_post_probe,
-            cooldowns,
-            backoffs,
-            cooldowns_3p,
-            backoffs_3p,
-            shutdown,
-            interval,
-            interval_3p,
-            startup_delay,
-        })
-        .await;
+        // Supervised run loop: restarts on panic with exponential
+        // backoff. Prevents a single bad tick from killing the
+        // entire poller permanently.
+        let mut restart_delay = Duration::from_secs(5);
+        let max_restart_delay = Duration::from_secs(300);
+
+        loop {
+            let cfg = RunLoopConfig {
+                base_dir: base_dir.clone(),
+                http_get: Arc::clone(&http_get),
+                http_post_probe: Arc::clone(&http_post_probe),
+                cooldowns: Arc::clone(&cooldowns),
+                backoffs: Arc::clone(&backoffs),
+                cooldowns_3p: Arc::clone(&cooldowns_3p),
+                backoffs_3p: Arc::clone(&backoffs_3p),
+                shutdown: shutdown.clone(),
+                interval,
+                interval_3p,
+                startup_delay,
+            };
+
+            let result = tokio::spawn(run_loop(cfg)).await;
+
+            if shutdown.is_cancelled() {
+                info!("usage poller supervisor: shutdown requested");
+                return;
+            }
+
+            match result {
+                Ok(()) => {
+                    // run_loop exited normally (shutdown)
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        restart_in_secs = restart_delay.as_secs(),
+                        "usage poller panicked — restarting"
+                    );
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(restart_delay) => {}
+                    }
+                    restart_delay = (restart_delay * 2).min(max_restart_delay);
+                    // Skip startup delay on restarts
+                    startup_delay = Duration::ZERO;
+                }
+            }
+        }
     });
 
     PollerHandle { join }
@@ -226,6 +267,7 @@ async fn run_loop(cfg: RunLoopConfig) {
     let mut last_3p_tick = Instant::now() - cfg.interval_3p; // triggers on first loop
 
     loop {
+        debug!("usage poller heartbeat — tick starting");
         tick(&cfg.base_dir, &cfg.http_get, &cfg.cooldowns, &cfg.backoffs).await;
 
         if last_3p_tick.elapsed() >= cfg.interval_3p {
@@ -297,10 +339,22 @@ pub(crate) async fn tick(
             .expose_secret()
             .to_string();
 
-        // Poll usage in spawn_blocking (blocking HTTP client)
+        // Poll usage in spawn_blocking with a timeout to prevent
+        // the 2026-04-12 hang where a stuck HTTP call blocked the
+        // entire poller indefinitely.
         let http = Arc::clone(http_get);
-        let poll_result =
-            tokio::task::spawn_blocking(move || poll_anthropic_usage(&token, &http)).await;
+        let join_handle = tokio::task::spawn_blocking(move || poll_anthropic_usage(&token, &http));
+        let poll_result = tokio::time::timeout(CALL_TIMEOUT, join_handle).await;
+
+        // Flatten: timeout → join → poll result
+        let poll_result = match poll_result {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                warn!(account = info.id, "usage poller: call timed out after 30s");
+                set_cooldown(cooldowns, info.id);
+                continue;
+            }
+        };
 
         match poll_result {
             Ok(Ok(usage)) => {
@@ -635,19 +689,64 @@ pub(crate) async fn tick_3p(
         let model = model_owned;
         let raw_key = api_key.expose_secret().to_string();
         let pid = provider_id.to_string();
-        let poll_result = tokio::task::spawn_blocking(move || {
-            if pid == "mm" {
-                // MiniMax: direct quota endpoint (authoritative)
-                poll_minimax_quota(&raw_key, &http_get)
+
+        // Load MiniMax GroupId from per-slot or global settings
+        let group_id = if pid == "mm" {
+            if info.id < 900 {
+                load_3p_env_string_for_slot(base_dir, info.id, "MINIMAX_GROUP_ID")
             } else {
-                // Z.AI and others: probe via rate-limit headers
-                poll_3p_usage(&url, &raw_key, &model, &http_probe)
+                // Global settings: check settings-mm.json
+                load_settings(base_dir, "mm")
+                    .ok()
+                    .and_then(|s| s.get_group_id().map(|s| s.to_string()))
             }
-        })
-        .await;
+        } else {
+            None
+        };
+
+        // MiniMax returns a richer structure (both 5h and 7d windows),
+        // so it gets its own result type. Other providers use RateLimitData.
+        enum PollResult3P {
+            RateLimits(RateLimitData),
+            MiniMax(MiniMaxQuota),
+        }
+
+        let join_handle = tokio::task::spawn_blocking(move || {
+            if pid == "mm" {
+                poll_minimax_quota(&raw_key, group_id.as_deref(), &model, &http_get)
+                    .map(PollResult3P::MiniMax)
+            } else if pid == "zai" {
+                Err(PollError::Parse(
+                    "Z.AI quota requires JWT session token — view usage at z.ai".into(),
+                ))
+            } else {
+                poll_3p_usage(&url, &raw_key, &model, &http_probe).map(PollResult3P::RateLimits)
+            }
+        });
+        let poll_result = match tokio::time::timeout(CALL_TIMEOUT, join_handle).await {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                warn!(account = info.id, "3P poller: call timed out after 30s");
+                set_cooldown(cooldowns, info.id);
+                continue;
+            }
+        };
 
         match poll_result {
-            Ok(Ok(rate_limits)) => {
+            Ok(Ok(PollResult3P::MiniMax(mm_quota))) => {
+                let base = base_dir.to_path_buf();
+                if let Err(e) = write_minimax_quota(&base, info.id, &mm_quota) {
+                    warn!(
+                        account = info.id,
+                        "3P poller: failed to write MiniMax quota"
+                    );
+                    let _ = e;
+                }
+                clear_cooldown(cooldowns, info.id);
+                clear_backoff(backoffs, info.id);
+                polled += 1;
+            }
+            Ok(Ok(PollResult3P::RateLimits(rate_limits))) => {
                 let base = base_dir.to_path_buf();
                 if let Err(e) = write_3p_usage_to_quota(&base, info.id, &rate_limits) {
                     warn!(account = info.id, "3P poller: failed to write quota");
@@ -834,22 +933,47 @@ pub(crate) fn poll_3p_usage(
     }
 }
 
+/// MiniMax quota data parsed from the `/coding_plan/remains` endpoint.
+///
+/// Carries both the 5-hour interval and 7-day weekly windows so the
+/// caller can write a complete `AccountQuota` entry.
+#[derive(Debug, Clone)]
+pub(crate) struct MiniMaxQuota {
+    /// 5-hour interval: used percentage and reset epoch.
+    pub five_hour: Option<UsageWindow>,
+    /// 7-day weekly: used percentage and reset epoch.
+    pub seven_day: Option<UsageWindow>,
+}
+
 /// Polls MiniMax's direct quota API for authoritative usage data.
 ///
-/// Endpoint: `GET https://www.minimax.io/v1/api/openplatform/coding_plan/remains`
+/// Endpoint: `GET https://platform.minimax.io/v1/api/openplatform/coding_plan/remains`
 /// Auth: `Authorization: Bearer <API_KEY>`
 ///
-/// This replaces the `max_tokens=1` probe hack with a direct quota
-/// query, consistent with the Account/Terminal separation principle:
-/// accounts poll their own authoritative usage source.
+/// **CRITICAL**: The endpoint is `/remains` — field names contain
+/// "usage_count" but the values are REMAINING counts, not consumed
+/// counts. `current_interval_usage_count: 29957` out of `total: 30000`
+/// means 29957 REMAIN and only 43 were USED.
+///
+/// `used_percentage = (total - remaining) / total * 100`
 pub(crate) fn poll_minimax_quota(
     api_key: &str,
+    group_id: Option<&str>,
+    model: &str,
     http_get: &HttpGetFn,
-) -> Result<RateLimitData, PollError> {
-    let url = "https://www.minimax.io/v1/api/openplatform/coding_plan/remains";
+) -> Result<MiniMaxQuota, PollError> {
+    // GroupId is optional — the API returns data for all models
+    // without it. If provided, it scopes to a specific org.
+    let url = match group_id {
+        Some(gid) if !gid.is_empty() => format!(
+            "https://platform.minimax.io/v1/api/openplatform/coding_plan/remains?GroupId={}",
+            gid
+        ),
+        _ => "https://platform.minimax.io/v1/api/openplatform/coding_plan/remains".to_string(),
+    };
     let extra_headers = [("Content-Type", "application/json")];
 
-    let (status, body) = http_get(url, api_key, &extra_headers).map_err(PollError::Transport)?;
+    let (status, body) = http_get(&url, api_key, &extra_headers).map_err(PollError::Transport)?;
 
     match status {
         429 => return Err(PollError::RateLimited),
@@ -858,32 +982,72 @@ pub(crate) fn poll_minimax_quota(
         other => return Err(PollError::HttpError(other)),
     }
 
-    // Parse the response. MiniMax returns quota remaining data.
-    // We map whatever fields are available to RateLimitData.
     let json: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| PollError::Parse(e.to_string()))?;
 
-    // MiniMax response structure may include fields like:
-    // { "base_status_code": 0, "data": { "remaining": N, "total": M, ... } }
-    // We extract what's available and map to our internal format.
-    let data = json.get("data").unwrap_or(&json);
+    let model_remains = json
+        .get("model_remains")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| PollError::Parse("missing model_remains array".into()))?;
 
-    let total = data
-        .get("total")
-        .or_else(|| data.get("limit"))
-        .and_then(|v| v.as_u64());
-    let remaining = data
-        .get("remaining")
-        .or_else(|| data.get("remains"))
-        .and_then(|v| v.as_u64());
+    // Find the matching model entry. Accept prefix match so
+    // "MiniMax-M2" matches "MiniMax-M2.7-highspeed". Also match
+    // the wildcard "MiniMax-M*" which is the coding plan entry.
+    let entry = model_remains
+        .iter()
+        .find(|e| {
+            e.get("model_name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| name.starts_with(model) || model.starts_with(name))
+        })
+        .or_else(|| model_remains.first())
+        .ok_or_else(|| PollError::Parse("model_remains array is empty".into()))?;
 
-    Ok(RateLimitData {
-        requests_limit: total,
-        requests_remaining: remaining,
-        tokens_limit: None,
-        tokens_remaining: None,
-        input_tokens_limit: None,
-        output_tokens_limit: None,
+    // 5-hour interval window.
+    // CRITICAL: "usage_count" is the REMAINING count (endpoint = /remains).
+    // used = total - remaining.
+    let five_hour = match (
+        entry
+            .get("current_interval_total_count")
+            .and_then(|v| v.as_u64()),
+        entry
+            .get("current_interval_usage_count")
+            .and_then(|v| v.as_u64()),
+        entry.get("end_time").and_then(|v| v.as_u64()),
+    ) {
+        (Some(total), Some(remaining), Some(end_ms)) if total > 0 => {
+            let used = total.saturating_sub(remaining);
+            Some(UsageWindow {
+                used_percentage: used as f64 / total as f64 * 100.0,
+                resets_at: end_ms / 1000, // ms → epoch seconds
+            })
+        }
+        _ => None,
+    };
+
+    // 7-day weekly window (same remaining semantics).
+    let seven_day = match (
+        entry
+            .get("current_weekly_total_count")
+            .and_then(|v| v.as_u64()),
+        entry
+            .get("current_weekly_usage_count")
+            .and_then(|v| v.as_u64()),
+        entry.get("weekly_end_time").and_then(|v| v.as_u64()),
+    ) {
+        (Some(total), Some(remaining), Some(end_ms)) if total > 0 => {
+            let used = total.saturating_sub(remaining);
+            Some(UsageWindow {
+                used_percentage: used as f64 / total as f64 * 100.0,
+                resets_at: end_ms / 1000,
+            })
+        }
+        _ => None,
+    };
+
+    Ok(MiniMaxQuota {
+        five_hour,
+        seven_day,
     })
 }
 
@@ -905,6 +1069,36 @@ pub(crate) fn extract_rate_limit_headers(headers: &HashMap<String, String>) -> R
         input_tokens_limit: get_u64("input-tokens-limit"),
         output_tokens_limit: get_u64("output-tokens-limit"),
     }
+}
+
+/// Writes MiniMax quota data (both 5h and 7d windows) into `quota.json`.
+fn write_minimax_quota(
+    base_dir: &std::path::Path,
+    account_id: u16,
+    mm: &MiniMaxQuota,
+) -> Result<(), crate::error::CsqError> {
+    let lock_path = quota_state::quota_path(base_dir).with_extension("lock");
+    let _guard = crate::platform::lock::lock_file(&lock_path)?;
+    let mut quota = quota_state::load_state(base_dir).unwrap_or_else(|_| QuotaFile::empty());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
+    quota.set(
+        account_id,
+        AccountQuota {
+            five_hour: mm.five_hour.clone(),
+            seven_day: mm.seven_day.clone(),
+            rate_limits: None,
+            updated_at: now,
+        },
+    );
+
+    quota_state::save_state(base_dir, &quota)?;
+    debug!(account = account_id, "MiniMax poller: quota file updated");
+    Ok(())
 }
 
 /// Writes 3P rate-limit data into the local `quota.json`.
@@ -1270,7 +1464,7 @@ mod tests {
     /// Mock HttpGetFn that returns a MiniMax-like quota response.
     fn mock_get_noop() -> HttpGetFn {
         Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
-            Ok((200, br#"{"data":{"remaining":800,"total":1000}}"#.to_vec()))
+            Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#.to_vec()))
         })
     }
 
@@ -1577,7 +1771,9 @@ mod tests {
     // ─── tick_3p integration tests ──────────────────────────
 
     #[tokio::test]
-    async fn tick_3p_polls_and_writes_quota() {
+    async fn tick_3p_zai_skips_probe_enters_cooldown() {
+        // Z.AI now requires JWT auth — the poller skips the probe
+        // and enters cooldown with a Parse error (issue #78).
         let dir = TempDir::new().unwrap();
         install_3p_account(dir.path(), "zai", "test-api-key");
 
@@ -1588,39 +1784,36 @@ mod tests {
 
         tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
 
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one HTTP POST");
-
-        // Verify quota was written
-        let quota = quota_state::load_state(dir.path()).unwrap();
-        let q = quota.get(901).expect("Z.AI account 901 should have quota");
-        // tokens: 100000 limit, 60000 remaining → 40% used
-        assert!((q.five_hour_pct() - 40.0).abs() < 0.01);
-        assert!(q.rate_limits.is_some());
-        let rl = q.rate_limits.as_ref().unwrap();
-        assert_eq!(rl.tokens_limit, Some(100000));
+        // Z.AI no longer calls the POST probe — it returns an error
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "Z.AI should skip probe");
+        // Should be in cooldown due to the Parse error
+        assert!(in_cooldown(&cooldowns, 901));
     }
 
     #[tokio::test]
     async fn tick_3p_429_enters_cooldown() {
+        // Use MiniMax (which still actually polls) for 429 cooldown test.
+        // MiniMax uses GET, so we mock the GET to return 429.
         let dir = TempDir::new().unwrap();
-        install_3p_account(dir.path(), "zai", "test-api-key");
+        install_3p_account(dir.path(), "mm", "test-api-key");
 
         let counter = Arc::new(AtomicU32::new(0));
-        let http = mock_3p_429(Arc::clone(&counter));
+        let http_get: HttpGetFn =
+            Arc::new(move |_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok((429, b"rate limited".to_vec()))
+            });
+        let http_post = mock_3p_success(Arc::new(AtomicU32::new(0)));
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        assert!(in_cooldown(&cooldowns, 901));
+        tick_3p(dir.path(), &http_get, &http_post, &cooldowns, &backoffs).await;
+        assert!(in_cooldown(&cooldowns, 902));
 
         // Second tick: cooldown blocks the poll
-        tick_3p(dir.path(), &mock_get_noop(), &http, &cooldowns, &backoffs).await;
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "cooldown should suppress"
-        );
+        tick_3p(dir.path(), &http_get, &http_post, &cooldowns, &backoffs).await;
+        // still in cooldown
+        assert!(in_cooldown(&cooldowns, 902));
     }
 
     #[tokio::test]
@@ -1646,7 +1839,8 @@ mod tests {
         let cooldowns = Arc::new(Mutex::new(HashMap::new()));
         let backoffs = Arc::new(Mutex::new(HashMap::new()));
 
-        // MiniMax uses direct GET endpoint, Z.AI uses POST probe
+        // MiniMax uses direct GET endpoint (mock_get_noop),
+        // Z.AI now skips probe entirely (issue #78 — needs JWT)
         tick_3p(
             dir.path(),
             &mock_get_noop(),
@@ -1657,15 +1851,17 @@ mod tests {
         .await;
         assert_eq!(
             post_counter.load(Ordering::SeqCst),
-            1,
-            "only Z.AI uses POST probe"
+            0,
+            "Z.AI skips probe, MiniMax uses GET — no POST calls"
         );
 
         let quota = quota_state::load_state(dir.path()).unwrap();
-        assert!(quota.get(901).is_some(), "Z.AI should have quota");
+        // Z.AI enters cooldown (no quota written — needs JWT)
+        assert!(in_cooldown(&cooldowns, 901), "Z.AI should be in cooldown");
+        // MiniMax should have quota via GET (GroupId configured above)
         assert!(
             quota.get(902).is_some(),
-            "MiniMax should have quota (via GET)"
+            "MiniMax should have quota (via GET with GroupId)"
         );
     }
 
@@ -1822,5 +2018,86 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         write_slot_settings_with_model(tmp.path(), 10, "glm-5.1");
         assert_eq!(load_3p_model_for_slot(tmp.path(), 10).unwrap(), "glm-5.1");
+    }
+
+    // ─── poll_minimax_quota tests ──────────────────────────────
+
+    fn mock_minimax_get(response: &'static str) -> HttpGetFn {
+        Arc::new(move |_url: &str, _token: &str, _headers: &[(&str, &str)]| {
+            Ok((200, response.as_bytes().to_vec()))
+        })
+    }
+
+    #[test]
+    fn poll_minimax_parses_both_windows() {
+        // usage_count = REMAINING (endpoint is /remains), NOT consumed.
+        // total=30000, remaining=29850 → used=150 → 0.5%
+        let response = r#"{"model_remains":[{
+            "model_name":"MiniMax-M2.7",
+            "current_interval_total_count":30000,
+            "current_interval_usage_count":29850,
+            "end_time":1776024000000,
+            "current_weekly_total_count":300000,
+            "current_weekly_usage_count":289000,
+            "weekly_end_time":1776038400000
+        }]}"#;
+        let http = mock_minimax_get(response);
+        let result = poll_minimax_quota("key", Some("123"), "MiniMax-M2", &http);
+        assert!(result.is_ok());
+        let mm = result.unwrap();
+
+        let fh = mm.five_hour.unwrap();
+        // used = 30000 - 29850 = 150, pct = 150/30000*100 = 0.5%
+        assert!((fh.used_percentage - 0.5).abs() < 0.01);
+        assert_eq!(fh.resets_at, 1776024000); // ms → s
+
+        let sd = mm.seven_day.unwrap();
+        // used = 300000 - 289000 = 11000, pct = 11000/300000*100 = 3.67%
+        assert!((sd.used_percentage - 3.67).abs() < 0.1);
+        assert_eq!(sd.resets_at, 1776038400);
+    }
+
+    #[test]
+    fn poll_minimax_matches_model_prefix() {
+        let response = r#"{"model_remains":[
+            {"model_name":"MiniMax-M2.7-highspeed","current_interval_total_count":30000,"current_interval_usage_count":29000,"end_time":1776024000000,"current_weekly_total_count":300000,"current_weekly_usage_count":290000,"weekly_end_time":1776038400000},
+            {"model_name":"MiniMax-M1","current_interval_total_count":10000,"current_interval_usage_count":9500,"end_time":1776024000000,"current_weekly_total_count":70000,"current_weekly_usage_count":60000,"weekly_end_time":1776038400000}
+        ]}"#;
+        let http = mock_minimax_get(response);
+        let result = poll_minimax_quota("key", Some("123"), "MiniMax-M2", &http);
+        let mm = result.unwrap();
+        // Should match the M2.7-highspeed entry (used = 30000-29000 = 1000)
+        let fh = mm.five_hour.unwrap();
+        assert!((fh.used_percentage - 3.33).abs() < 0.1);
+    }
+
+    #[test]
+    fn poll_minimax_works_without_group_id() {
+        let response = r#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#;
+        let http = mock_minimax_get(response);
+        let result = poll_minimax_quota("key", None, "MiniMax-M2", &http);
+        assert!(result.is_ok());
+        // used = 1000-800 = 200 → 20%
+        let fh = result.unwrap().five_hour.unwrap();
+        assert!((fh.used_percentage - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn poll_minimax_works_with_empty_group_id() {
+        let response = r#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":200,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#;
+        let http = mock_minimax_get(response);
+        let result = poll_minimax_quota("key", Some(""), "MiniMax-M2", &http);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn poll_minimax_falls_back_to_first_model() {
+        let response = r#"{"model_remains":[{"model_name":"SomeOtherModel","current_interval_total_count":5000,"current_interval_usage_count":4900,"end_time":1776024000000,"current_weekly_total_count":35000,"current_weekly_usage_count":34000,"weekly_end_time":1776038400000}]}"#;
+        let http = mock_minimax_get(response);
+        let result = poll_minimax_quota("key", Some("123"), "MiniMax-M2", &http);
+        let mm = result.unwrap();
+        // Falls back to first entry: used = 5000-4900 = 100 → 2%
+        let fh = mm.five_hour.unwrap();
+        assert!((fh.used_percentage - 2.0).abs() < 0.01);
     }
 }

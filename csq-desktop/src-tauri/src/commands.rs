@@ -244,11 +244,6 @@ pub struct SessionView {
     /// Human-readable iTerm2 tab title resolved via osascript.
     /// Most specific identifier when available.
     pub terminal_title: Option<String>,
-    /// True when `.csq-account` marker was modified after the CC
-    /// process started — meaning a swap happened while this session
-    /// was running. CC won't pick up the new credentials until the
-    /// user restarts their `claude` session.
-    pub needs_restart: bool,
 }
 
 /// Returns the list of live Claude Code sessions under the current
@@ -292,31 +287,6 @@ pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
             .and_then(|id| quota.get(id).map(|q| q.seven_day_pct()))
             .unwrap_or(0.0);
 
-        // Detect stale sessions: if the marker file was modified
-        // well after the CC process started, a swap happened while
-        // it was running. CC caches credentials in memory, so the
-        // process is still using the OLD account's tokens.
-        //
-        // Grace period: `csq run N` writes the marker BEFORE
-        // spawning claude, so a freshly launched session always has
-        // marker_mtime >= process_start. A 5-second buffer avoids
-        // false "restart needed" badges on new sessions while still
-        // catching genuine post-launch swaps.
-        const RESTART_GRACE_SECS: u64 = 5;
-        let needs_restart = s.started_at.is_some_and(|proc_start| {
-            let marker_path = s.config_dir.join(".csq-account");
-            std::fs::metadata(&marker_path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|mtime| {
-                    mtime
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| d.as_secs())
-                })
-                .is_some_and(|marker_secs| marker_secs > proc_start + RESTART_GRACE_SECS)
-        });
-
         out.push(SessionView {
             pid: s.pid,
             cwd: s.cwd.display().to_string(),
@@ -332,7 +302,6 @@ pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
             term_pane: s.term_pane,
             iterm_profile: s.iterm_profile,
             terminal_title: s.terminal_title,
-            needs_restart,
         });
     }
 

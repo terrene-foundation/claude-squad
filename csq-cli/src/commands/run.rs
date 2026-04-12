@@ -29,27 +29,18 @@ pub fn handle(
         }
     };
 
-    // Set up config dir
+    // Ensure config-N exists (permanent account home)
     let config_dir = base_dir.join(format!("config-{}", account));
     std::fs::create_dir_all(&config_dir)?;
 
-    // Isolate: symlink shared items
-    session::isolate_config_dir(&claude_home, &config_dir)
-        .context("failed to isolate config dir")?;
-
-    // Mark account
+    // Mark account on config-N (permanent identity)
     markers::write_csq_account(&config_dir, account)?;
     markers::write_current_account(&config_dir, account)?;
 
-    // Cleanup stale PID
-    session::setup::cleanup_stale_pid(&config_dir);
-
-    // Mark onboarding complete
+    // Mark onboarding complete on config-N
     session::mark_onboarding_complete(&config_dir)?;
 
     // Check broker-failed flag before launching.
-    // Real token refresh happens via the daemon (M8); for now we honor
-    // the flag but don't try to refresh ourselves.
     if is_broker_failed(base_dir, account) {
         return Err(anyhow!(
             "account {} is in LOGIN-NEEDED state — run `csq login {}` to re-authenticate",
@@ -58,12 +49,12 @@ pub fn handle(
         ));
     }
 
-    // Verify canonical credentials exist and are loadable before copying
+    // Verify canonical credentials exist and are loadable
     let canonical_path = file::canonical_path(base_dir, account);
     let canonical = credentials::load(&canonical_path)
         .with_context(|| format!("failed to load canonical credentials for account {account}"))?;
 
-    // Warn if token is already expired (refresh will happen via daemon when available)
+    // Warn if token is already expired
     if canonical.claude_ai_oauth.is_expired_within(0) {
         eprintln!(
             "warning: access token for account {} has expired — CC may fail until the daemon refreshes it",
@@ -71,44 +62,52 @@ pub fn handle(
         );
     }
 
-    // Copy credentials for the session
+    // Copy credentials into config-N so symlinks resolve
     session::setup::copy_credentials_for_session(base_dir, &config_dir, account)
         .context("failed to copy credentials")?;
 
-    // Merge profile settings if specified.
-    // Profile overlay requires wiring session::merge::merge_settings onto
-    // config_dir/settings.json — deferred to the follow-up PR that adds
-    // profile CLI plumbing.
+    // Profile support deferred
     if let Some(profile_id) = profile {
         return Err(anyhow!(
             "--profile support is not yet implemented (requested: {profile_id})"
         ));
     }
 
-    println!("Launching claude for account {}...", account);
+    // Create ephemeral handle dir: term-<pid> with symlinks to config-N
+    let pid = std::process::id();
+    let handle_dir = session::create_handle_dir(base_dir, &claude_home, account, pid)
+        .context("failed to create handle dir")?;
+
+    // Convert to absolute path (spec 03 requires it)
+    let handle_dir_abs = std::fs::canonicalize(&handle_dir).unwrap_or_else(|_| handle_dir.clone());
+
+    println!("Launching claude for account {} (term-{})...", account, pid);
 
     // Strip ANTHROPIC_* (and related) env vars before exec.
-    // Prevents env-poisoning attacks where ANTHROPIC_BASE_URL could
-    // redirect traffic to an attacker server.
     let mut cmd = Command::new("claude");
-    cmd.env("CLAUDE_CONFIG_DIR", &config_dir);
+    cmd.env("CLAUDE_CONFIG_DIR", &handle_dir_abs);
     strip_sensitive_env(&mut cmd);
     cmd.args(rest);
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // exec replaces process — if it fails, clean up handle dir
         let err = cmd.exec();
+        let _ = std::fs::remove_dir_all(&handle_dir);
         Err(anyhow!("exec failed: {err}"))
     }
 
     #[cfg(not(unix))]
     {
-        let status = cmd.status()?;
-        if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
+        let status = cmd.status();
+        // Always clean up handle dir on Windows (we wait for claude to exit)
+        let _ = std::fs::remove_dir_all(&handle_dir);
+        match status {
+            Ok(s) if !s.success() => std::process::exit(s.code().unwrap_or(1)),
+            Ok(_) => Ok(()),
+            Err(e) => Err(anyhow!("failed to launch claude: {e}")),
         }
-        Ok(())
     }
 }
 

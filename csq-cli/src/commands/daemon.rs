@@ -154,6 +154,14 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
                     let auto_rotator =
                         daemon::spawn_auto_rotate(base_dir_for_runtime.clone(), shutdown.clone());
 
+                    // Start the handle-dir sweep. Scans term-* dirs
+                    // every 60 seconds and removes orphans whose PID
+                    // is no longer alive.
+                    let sweep = csq_core::session::spawn_sweep(
+                        base_dir_for_runtime.clone(),
+                        shutdown.clone(),
+                    );
+
                     // Block until SIGTERM/SIGINT arrives.
                     wait_for_shutdown().await;
 
@@ -191,6 +199,14 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
                         Ok(Ok(())) => tracing::info!("auto-rotation loop stopped cleanly"),
                         Ok(Err(e)) => tracing::warn!(error = %e, "auto-rotation task panicked"),
                         Err(_) => tracing::warn!("auto-rotation did not stop within 5s deadline"),
+                    }
+
+                    // Await the handle-dir sweep with a 5s deadline.
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), sweep.join).await
+                    {
+                        Ok(Ok(())) => tracing::info!("handle-dir sweep stopped cleanly"),
+                        Ok(Err(e)) => tracing::warn!(error = %e, "handle-dir sweep panicked"),
+                        Err(_) => tracing::warn!("handle-dir sweep did not stop within 5s"),
                     }
 
                     // Give the accept loop up to 5s to exit.

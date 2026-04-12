@@ -23,7 +23,6 @@
     term_pane: number | null;
     iterm_profile: string | null;
     terminal_title: string | null;
-    needs_restart: boolean;
   }
 
   interface AccountView {
@@ -343,9 +342,6 @@
                   {/if}
                 </span>
               {/if}
-              {#if session.needs_restart}
-                <span class="restart-badge" title="Credentials were swapped after this session started. Restart claude to use the new account.">restart needed</span>
-              {/if}
               <span class="quota-badge {quotaClass(session.five_hour_pct)}">
                 5h:{Math.round(session.five_hour_pct)}%
               </span>
@@ -523,17 +519,6 @@
   }
   .quota {
     font-family: ui-monospace, monospace;
-  }
-  .restart-badge {
-    font-size: 0.65rem;
-    font-weight: 600;
-    color: var(--yellow);
-    border: 1px solid var(--yellow);
-    border-radius: 999px;
-    padding: 0 0.35em;
-    line-height: 1.5;
-    white-space: nowrap;
-    opacity: 0.9;
   }
   .quota-ok {
     color: var(--green);
