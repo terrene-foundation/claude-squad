@@ -329,6 +329,7 @@ async fn run_daemon(
         shutdown.clone(),
     );
     let auto_rotator = daemon::spawn_auto_rotate(base_dir.to_path_buf(), shutdown.clone());
+    let sweep = csq_core::session::spawn_sweep(base_dir.to_path_buf(), shutdown.clone());
 
     // Block until cancellation fires from the app lifecycle.
     outer_cancel.cancelled().await;
@@ -341,6 +342,7 @@ async fn run_daemon(
     let _ = tokio::time::timeout(Duration::from_secs(5), refresher.join).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), usage_poller.join).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), auto_rotator.join).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), sweep.join).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), server_join).await;
 
     Ok(())

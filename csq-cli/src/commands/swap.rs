@@ -1,37 +1,71 @@
-//! `csq swap N` — swap the active account in the current config directory.
+//! `csq swap N` — swap the active account in the current terminal.
+//!
+//! In the handle-dir model, swap atomically repoints symlinks in the
+//! `term-<pid>` handle directory. In legacy mode (`config-N` dir),
+//! falls back to the old credential-copy approach with a warning.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use csq_core::rotation;
+use csq_core::session::handle_dir;
 use csq_core::types::AccountNum;
 use std::path::Path;
 
 pub fn handle(base_dir: &Path, target: AccountNum) -> Result<()> {
-    let config_dir = super::validated_config_dir(base_dir)?;
+    let config_dir_str = std::env::var("CLAUDE_CONFIG_DIR").map_err(|_| {
+        anyhow!("CLAUDE_CONFIG_DIR not set — this command must run inside a csq-managed session")
+    })?;
 
-    let result = rotation::swap_to(base_dir, &config_dir, target)?;
+    let config_dir = std::path::PathBuf::from(&config_dir_str);
+    let dir_name = config_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
 
-    let expires_in_min = (result.expires_at_ms / 1000).saturating_sub(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs(),
-    ) / 60;
+    if dir_name.starts_with("term-") {
+        // Handle-dir model: repoint symlinks (no credential writes)
+        handle_dir::repoint_handle_dir(base_dir, &config_dir, target)?;
 
-    // Notify the daemon to clear its caches so that /api/accounts
-    // and /api/refresh-status reflect the new active account
-    // immediately. Silent on failure — the daemon may not be running.
-    notify_daemon_cache_invalidation(base_dir);
+        // Notify the daemon to clear its caches
+        notify_daemon_cache_invalidation(base_dir);
 
-    println!(
-        "Swapped to account {} — token valid {}m",
-        result.account, expires_in_min
-    );
+        println!(
+            "Swapped to account {} — CC will pick up on next API call",
+            target
+        );
+    } else if dir_name.starts_with("config-") {
+        // Legacy model: credential copy (with deprecation warning)
+        eprintln!(
+            "warning: running in legacy config-dir mode ({dir_name}). \
+             Swap affects ALL terminals sharing this dir. \
+             Relaunch with `csq run {target}` for per-terminal isolation."
+        );
+
+        let validated = super::validated_config_dir(base_dir)?;
+        let result = rotation::swap_to(base_dir, &validated, target)?;
+
+        let expires_in_min = (result.expires_at_ms / 1000).saturating_sub(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+        ) / 60;
+
+        notify_daemon_cache_invalidation(base_dir);
+
+        println!(
+            "Swapped to account {} — token valid {}m",
+            result.account, expires_in_min
+        );
+    } else {
+        return Err(anyhow!(
+            "CLAUDE_CONFIG_DIR does not point to a csq-managed directory: {config_dir_str}"
+        ));
+    }
+
     Ok(())
 }
 
 /// Best-effort cache invalidation: POST /api/invalidate-cache to
-/// the daemon if it's reachable. Failures are silently ignored
-/// because the swap itself has already succeeded and the cache will
-/// expire naturally within 5 seconds anyway.
+/// the daemon if it's reachable.
 #[cfg(unix)]
 fn notify_daemon_cache_invalidation(base_dir: &Path) {
     let sock = csq_core::daemon::socket_path(base_dir);
