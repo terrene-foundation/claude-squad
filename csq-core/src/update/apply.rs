@@ -32,9 +32,9 @@
 //! returned and the user is instructed to close and restart csq before
 //! updating.
 
-use crate::platform::fs::{atomic_replace, unique_tmp_path};
 #[cfg(not(unix))]
 use crate::platform::fs::secure_file;
+use crate::platform::fs::{atomic_replace, unique_tmp_path};
 use crate::update::github::UpdateInfo;
 use crate::update::verify::{verify_checksum, verify_signature};
 use anyhow::{Context, Result};
@@ -64,15 +64,17 @@ where
         .map_err(|e| anyhow::anyhow!("failed to download binary: {e}"))?;
 
     // Step 2: download checksum file.
-    let sha256sums_bytes =
-        http_get(&info.checksum_url, &[("User-Agent", user_agent().as_str())])
-            .map_err(|e| anyhow::anyhow!("failed to download SHA256SUMS: {e}"))?;
-    let sha256sums_text = String::from_utf8(sha256sums_bytes)
-        .context("SHA256SUMS file is not valid UTF-8")?;
+    let sha256sums_bytes = http_get(&info.checksum_url, &[("User-Agent", user_agent().as_str())])
+        .map_err(|e| anyhow::anyhow!("failed to download SHA256SUMS: {e}"))?;
+    let sha256sums_text =
+        String::from_utf8(sha256sums_bytes).context("SHA256SUMS file is not valid UTF-8")?;
 
     // Step 3: download signature file.
-    let sig_bytes = http_get(&info.signature_url, &[("User-Agent", user_agent().as_str())])
-        .map_err(|e| anyhow::anyhow!("failed to download signature: {e}"))?;
+    let sig_bytes = http_get(
+        &info.signature_url,
+        &[("User-Agent", user_agent().as_str())],
+    )
+    .map_err(|e| anyhow::anyhow!("failed to download signature: {e}"))?;
 
     // Step 4: verify SHA256 checksum.
     let binary_filename = extract_filename(&info.download_url);
@@ -94,10 +96,7 @@ where
         .with_context(|| format!("failed to set permissions on {}", tmp_path.display()))?;
 
     // Step 8: atomic replace.
-    eprintln!(
-        "Replacing {} with new version...",
-        binary_path.display()
-    );
+    eprintln!("Replacing {} with new version...", binary_path.display());
     atomic_replace(&tmp_path, &binary_path).with_context(|| {
         // Clean up the temp file on failure to avoid leaving a stale binary.
         let _ = std::fs::remove_file(&tmp_path);
@@ -107,7 +106,10 @@ where
         )
     })?;
 
-    eprintln!("csq v{} installed. Restart csq to use the new version.", info.version);
+    eprintln!(
+        "csq v{} installed. Restart csq to use the new version.",
+        info.version
+    );
     Ok(())
 }
 
@@ -249,8 +251,14 @@ mod tests {
         // be overridden, we test the inner steps directly below and keep
         // this as an integration test of the verification chain.
         let mut responses: HashMap<&'static str, Vec<u8>> = HashMap::new();
-        responses.insert("https://example.com/csq-linux-x86_64", bundle.binary.clone());
-        responses.insert("https://example.com/csq-linux-x86_64.sig", bundle.sig.clone());
+        responses.insert(
+            "https://example.com/csq-linux-x86_64",
+            bundle.binary.clone(),
+        );
+        responses.insert(
+            "https://example.com/csq-linux-x86_64.sig",
+            bundle.sig.clone(),
+        );
         responses.insert(
             "https://example.com/SHA256SUMS",
             bundle.sha256sums.as_bytes().to_vec(),
@@ -276,11 +284,7 @@ mod tests {
         );
 
         // Confirm the transport returns the right bytes for each URL
-        let binary_from_transport = transport(
-            "https://example.com/csq-linux-x86_64",
-            &[],
-        )
-        .unwrap();
+        let binary_from_transport = transport("https://example.com/csq-linux-x86_64", &[]).unwrap();
         assert_eq!(binary_from_transport, new_content);
     }
 
@@ -295,7 +299,10 @@ mod tests {
         let mut responses: HashMap<&'static str, Vec<u8>> = HashMap::new();
         // Serve the TAMPERED binary but the checksum for the original
         responses.insert("https://example.com/csq-linux-x86_64", tampered.to_vec());
-        responses.insert("https://example.com/csq-linux-x86_64.sig", bundle.sig.clone());
+        responses.insert(
+            "https://example.com/csq-linux-x86_64.sig",
+            bundle.sig.clone(),
+        );
         responses.insert(
             "https://example.com/SHA256SUMS",
             bundle.sha256sums.as_bytes().to_vec(),
@@ -305,10 +312,8 @@ mod tests {
 
         // Act: simulate the checksum check
         let downloaded = transport("https://example.com/csq-linux-x86_64", &[]).unwrap();
-        let sums_text = String::from_utf8(
-            transport("https://example.com/SHA256SUMS", &[]).unwrap(),
-        )
-        .unwrap();
+        let sums_text =
+            String::from_utf8(transport("https://example.com/SHA256SUMS", &[]).unwrap()).unwrap();
         let result = verify_checksum(&downloaded, &sums_text, filename);
 
         // Assert
@@ -339,16 +344,17 @@ mod tests {
         // Act: simulate the verification chain
         let downloaded = transport("https://example.com/csq-linux-x86_64", &[]).unwrap();
         let bad_sig_bytes = transport("https://example.com/csq-linux-x86_64.sig", &[]).unwrap();
-        let sums_text = String::from_utf8(
-            transport("https://example.com/SHA256SUMS", &[]).unwrap(),
-        )
-        .unwrap();
+        let sums_text =
+            String::from_utf8(transport("https://example.com/SHA256SUMS", &[]).unwrap()).unwrap();
 
         let checksum_ok = verify_checksum(&downloaded, &sums_text, filename);
         let sig_result = verify_signature(&downloaded, &bad_sig_bytes);
 
         // Assert
-        assert!(checksum_ok.is_ok(), "checksum should pass for untampered binary");
+        assert!(
+            checksum_ok.is_ok(),
+            "checksum should pass for untampered binary"
+        );
         assert!(sig_result.is_err(), "bad signature must be rejected");
     }
 
@@ -356,13 +362,14 @@ mod tests {
     fn download_and_apply_fails_on_transport_error() {
         // Arrange: transport that always errors
         let info = fake_update_info("2.1.0");
-        let result = download_and_apply(&info, |_url, _headers| {
-            Err("connection failed".into())
-        });
+        let result = download_and_apply(&info, |_url, _headers| Err("connection failed".into()));
 
         // Assert
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to download"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to download"));
     }
 
     #[test]

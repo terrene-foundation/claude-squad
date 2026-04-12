@@ -111,7 +111,9 @@ pub fn install() -> Result<()> {
     print!("Download and install? [y/N] ");
     // Flush stdout before waiting for input.
     use std::io::Write;
-    std::io::stdout().flush().context("failed to flush stdout")?;
+    std::io::stdout()
+        .flush()
+        .context("failed to flush stdout")?;
 
     let mut response = String::new();
     std::io::stdin()

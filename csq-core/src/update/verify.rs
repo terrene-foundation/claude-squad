@@ -59,9 +59,8 @@ pub const RELEASE_PUBLIC_KEY_BYTES: [u8; 32] = [
     // Placeholder: derived from seed [1u8; 32] — NOT a production key.
     // Generated via: SigningKey::from_bytes(&[1u8; 32]).verifying_key().to_bytes()
     // Actual bytes confirmed by test `print_public_key_bytes_for_seed_1`.
-    0x8a, 0x88, 0xe3, 0xdd, 0x74, 0x09, 0xf1, 0x95, 0xfd, 0x52, 0xdb, 0x2d, 0x3c, 0xba, 0x5d,
-    0x72, 0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f,
-    0x6f, 0x5c,
+    0x8a, 0x88, 0xe3, 0xdd, 0x74, 0x09, 0xf1, 0x95, 0xfd, 0x52, 0xdb, 0x2d, 0x3c, 0xba, 0x5d, 0x72,
+    0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f, 0x6f, 0x5c,
 ];
 
 /// Verifies an Ed25519 signature over `binary_bytes`.
@@ -141,9 +140,7 @@ pub fn verify_checksum(
             }
         })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no SHA256 checksum entry found for '{binary_filename}' in SHA256SUMS"
-            )
+            anyhow::anyhow!("no SHA256 checksum entry found for '{binary_filename}' in SHA256SUMS")
         })?;
 
     // Validate the recorded hash is a 64-char hex string.
@@ -178,7 +175,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
 
-// Helper: sign `data` with the test signing key and return 64 sig bytes.
+    // Helper: sign `data` with the test signing key and return 64 sig bytes.
     fn sign(data: &[u8]) -> Vec<u8> {
         let sk = test_signing_key();
         let sig = sk.sign(data);
@@ -205,7 +202,11 @@ mod tests {
         let result = verify_signature(binary, &sig_bytes);
 
         // Assert
-        assert!(result.is_ok(), "valid signature must be accepted: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "valid signature must be accepted: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -219,7 +220,10 @@ mod tests {
         let result = verify_signature(tampered, &sig_bytes);
 
         // Assert
-        assert!(result.is_err(), "signature for different binary must be rejected");
+        assert!(
+            result.is_err(),
+            "signature for different binary must be rejected"
+        );
     }
 
     #[test]
@@ -292,7 +296,11 @@ mod tests {
         let result = verify_checksum(binary, &sums, filename);
 
         // Assert
-        assert!(result.is_ok(), "matching checksum must be accepted: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "matching checksum must be accepted: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -351,7 +359,11 @@ mod tests {
         let result = verify_checksum(binary, &sums, filename);
 
         // Assert: comment lines must be skipped, not cause a parse error
-        assert!(result.is_ok(), "comment lines must be ignored: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "comment lines must be ignored: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -371,6 +383,10 @@ mod tests {
         let result = verify_checksum(binary, &sums, "csq-macos-aarch64");
 
         // Assert
-        assert!(result.is_ok(), "should match among multiple entries: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "should match among multiple entries: {:?}",
+            result
+        );
     }
 }

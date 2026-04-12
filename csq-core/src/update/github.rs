@@ -235,7 +235,8 @@ mod tests {
     fn fake_release_json(version: &str, platform_stem: &str) -> Vec<u8> {
         let binary_name = binary_asset_name(platform_stem);
         let sig_name = format!("{platform_stem}.sig");
-        let base = format!("https://github.com/terrene-foundation/csq/releases/download/v{version}");
+        let base =
+            format!("https://github.com/terrene-foundation/csq/releases/download/v{version}");
         serde_json::json!({
             "tag_name": format!("v{version}"),
             "html_url": format!("https://github.com/terrene-foundation/csq/releases/tag/v{version}"),
@@ -286,7 +287,10 @@ mod tests {
         let result = check_latest_version(|_url, _headers| Ok(json.clone()));
 
         // Assert
-        assert!(result.unwrap().is_none(), "should return None when up to date");
+        assert!(
+            result.unwrap().is_none(),
+            "should return None when up to date"
+        );
     }
 
     #[test]
@@ -433,7 +437,10 @@ mod tests {
     fn current_platform_stem_is_valid() {
         // Just confirm the function runs and returns something reasonable.
         let stem = current_platform_stem();
-        assert!(stem.starts_with("csq-"), "stem must start with csq-: {stem}");
+        assert!(
+            stem.starts_with("csq-"),
+            "stem must start with csq-: {stem}"
+        );
         assert!(
             stem.contains("aarch64") || stem.contains("x86_64"),
             "stem must contain arch: {stem}"

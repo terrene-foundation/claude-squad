@@ -721,7 +721,10 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
 
         // Assert
-        assert!(json.contains("\"terminals\""), "JSON must include terminals key");
+        assert!(
+            json.contains("\"terminals\""),
+            "JSON must include terminals key"
+        );
         assert!(
             json.contains("\"modern_count\":5"),
             "JSON must include modern_count"

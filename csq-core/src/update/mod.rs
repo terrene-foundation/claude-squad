@@ -182,10 +182,7 @@ mod tests {
 
         // Set mtime to 25 hours ago
         let past = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         // Use filetime crate? We don't have it. Use a different approach:
         // Just drop the file, wait, and rely on the mtime being in the past.
         // Instead, we set the file's mtime via std::fs on Unix.
@@ -196,8 +193,7 @@ mod tests {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let path_cstr =
-                std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            let path_cstr = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
             unsafe {
                 let times = [
                     libc::timeval {
@@ -229,12 +225,19 @@ mod tests {
     fn write_cache_timestamp_creates_parent_dirs() {
         // Arrange: nested path whose parent does not yet exist
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("deep").join("nested").join(".csq-update-check");
+        let path = dir
+            .path()
+            .join("deep")
+            .join("nested")
+            .join(".csq-update-check");
 
         // Act
         write_cache_timestamp(&path);
 
         // Assert
-        assert!(path.exists(), "write_cache_timestamp must create parent dirs");
+        assert!(
+            path.exists(),
+            "write_cache_timestamp must create parent dirs"
+        );
     }
 }
