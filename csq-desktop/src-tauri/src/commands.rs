@@ -314,9 +314,7 @@ pub fn list_sessions(base_dir: String) -> Result<Vec<SessionView>, String> {
                         .ok()
                         .map(|d| d.as_secs())
                 })
-                .is_some_and(|marker_secs| {
-                    marker_secs > proc_start + RESTART_GRACE_SECS
-                })
+                .is_some_and(|marker_secs| marker_secs > proc_start + RESTART_GRACE_SECS)
         });
 
         out.push(SessionView {
