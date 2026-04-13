@@ -26,7 +26,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": ["app", "dmg", "deb", "rpm", "appimage", "msi", "nsis"],
+    "publisher": "Terrene Foundation",
+    "homepage": "https://github.com/terrene-foundation/csq",
+    "shortDescription": "Multi-provider session manager for Claude Code",
+    "longDescription": "Code Session Quota (csq) — run Claude Code against local models, third-party APIs, or pool multiple Claude Max subscriptions with per-terminal isolation and quota monitoring.",
+    "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,6 +44,18 @@
         "appPosition": { "x": 160, "y": 200 },
         "applicationFolderPosition": { "x": 400, "y": 200 },
         "windowSize": { "width": 560, "height": 400 }
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1"],
+        "section": "devel"
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "libappindicator-gtk3"]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
       }
     }
   }

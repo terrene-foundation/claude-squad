@@ -23,17 +23,70 @@ Multi-provider session manager for Claude Code. Run Claude Code against local mo
 
 ## Install
 
-csq is currently distributed **source-only** — there are no signed binaries yet. The Terrene Foundation has not provisioned code-signing certificates (Apple Developer ID for macOS, Authenticode for Windows) because the recurring cost is not yet justified for an alpha release. Build from source takes 2–5 minutes on a modern machine.
+csq ships **unsigned** binaries for all three platforms. The Terrene Foundation has not yet provisioned code-signing certificates (Apple Developer ID, Authenticode) because the recurring cost is not yet justified for an alpha release. The CLI works identically to a signed build; the desktop app triggers a one-time Gatekeeper/SmartScreen warning on first launch.
 
-Prebuilt signed releases will ship when signing is funded. Track progress at [GitHub Releases](https://github.com/terrene-foundation/csq/releases).
+CLI binaries download via the install script without warnings. The desktop app ships as `.dmg` (macOS), `.AppImage`/`.deb`/`.rpm` (Linux), and `.msi` (Windows). You can also build any component from source.
 
 ### Prerequisites
 
-- **Rust** 1.89+ — install via [rustup.rs](https://rustup.rs)
 - **Claude Code** — install via [docs.anthropic.com/en/docs/claude-code](https://docs.anthropic.com/en/docs/claude-code)
-- **Node.js** 18+ — only required if building the desktop app
+- Building from source: **Rust** 1.94+ ([rustup.rs](https://rustup.rs)) and, for the desktop app, **Node.js** 22+
 
-### CLI
+### CLI — binary install (recommended)
+
+<table>
+<tr>
+<th>macOS</th>
+<th>Linux</th>
+<th>Windows</th>
+</tr>
+<tr>
+<td>
+
+```bash
+curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
+```
+
+Installs to `~/.local/bin/csq`. SHA256 verified against the release's `SHA256SUMS`.
+
+Works on both Apple Silicon (`aarch64`) and Intel (`x86_64`).
+
+</td>
+<td>
+
+```bash
+curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
+```
+
+Installs to `~/.local/bin/csq`. SHA256 verified against the release's `SHA256SUMS`.
+
+`x86_64` only. For `aarch64` Linux, build from source.
+
+</td>
+<td>
+
+```powershell
+# PowerShell
+$url = "https://github.com/terrene-foundation/csq/releases/latest/download/csq-windows-x86_64.exe"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.local\bin" | Out-Null
+Invoke-WebRequest $url -OutFile "$env:USERPROFILE\.local\bin\csq.exe"
+```
+
+Then add `%USERPROFILE%\.local\bin` to `PATH` if it isn't already.
+
+</td>
+</tr>
+</table>
+
+After install:
+
+```bash
+csq --version    # should print: csq 2.0.0-alpha.2
+csq doctor       # runs diagnostics
+csq login 1      # authenticate your first account
+```
+
+### CLI — from source
 
 ```bash
 git clone https://github.com/terrene-foundation/csq.git
@@ -42,14 +95,60 @@ cargo build --release -p csq-cli
 cp target/release/csq ~/.local/bin/csq    # or anywhere on your $PATH
 ```
 
-Verify the install:
+### Desktop app — binary install
+
+Download the latest artifact for your platform from [GitHub Releases](https://github.com/terrene-foundation/csq/releases).
+
+<table>
+<tr>
+<th>macOS</th>
+<th>Linux</th>
+<th>Windows</th>
+</tr>
+<tr>
+<td>
+
+**`csq-desktop-macos.dmg`**
+
+1. Double-click the `.dmg` to mount it
+2. Drag `Code Session Quota.app` to `Applications`
+3. Right-click the app → **Open** → **Open** (first launch only)
+
+macOS remembers your choice after the first launch.
+
+</td>
+<td>
+
+**`csq-desktop-linux.AppImage`** — no install, just run:
 
 ```bash
-csq --version    # should print: csq 2.0.0-alpha.2
-csq doctor       # runs diagnostics
+chmod +x csq-desktop-linux.AppImage
+./csq-desktop-linux.AppImage
 ```
 
-### Desktop app
+Or install system-wide with **`csq-desktop-linux.deb`** / **`csq-desktop-linux.rpm`**:
+
+```bash
+sudo dpkg -i csq-desktop-linux.deb
+# or
+sudo rpm -i csq-desktop-linux.rpm
+```
+
+</td>
+<td>
+
+**`csq-desktop-windows.msi`**
+
+1. Double-click the `.msi` to run the installer
+2. On first launch: **More info** → **Run anyway** (SmartScreen)
+
+SmartScreen remembers your choice after the first launch.
+
+</td>
+</tr>
+</table>
+
+### Desktop app — from source
 
 ```bash
 git clone https://github.com/terrene-foundation/csq.git    # skip if already cloned
@@ -58,13 +157,13 @@ npm install
 npx @tauri-apps/cli build
 ```
 
-The built app lands at `target/release/bundle/<platform>/Code Session Quota.app` (macOS) / `.AppImage` (Linux) / `.msi` (Windows).
+Artifacts land at `target/release/bundle/<format>/`:
 
-**macOS first launch:** the app is unsigned, so Gatekeeper will block it. Right-click the `.app` in Finder, choose "Open", then click "Open" in the warning dialog. After the first run macOS remembers your choice.
-
-**Windows first launch:** SmartScreen will show "Windows protected your PC". Click "More info" → "Run anyway". SmartScreen remembers after the first run.
-
-**Linux:** no warnings; the AppImage runs as-is.
+| Platform | Outputs                                         |
+| -------- | ----------------------------------------------- |
+| macOS    | `macos/Code Session Quota.app`, `dmg/*.dmg`     |
+| Linux    | `deb/*.deb`, `rpm/*.rpm`, `appimage/*.AppImage` |
+| Windows  | `msi/*.msi`, `nsis/*-setup.exe`                 |
 
 ### Development mode
 

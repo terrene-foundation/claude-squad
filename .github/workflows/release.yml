@@ -1,0 +1,227 @@
+name: Release
+
+# Triggered by pushing a tag that looks like v*, e.g. v2.0.0-alpha.3.
+# Builds CLI and desktop artifacts for all 3 platforms in parallel,
+# then uploads them to the matching GitHub Release.
+#
+# Artifacts are UNSIGNED. Users on macOS will see Gatekeeper warnings
+# on first launch of the .app bundle; users on Windows will see
+# SmartScreen warnings on first launch of .msi/.exe. CLI binaries
+# downloaded via curl/install.sh do not trigger either warning.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_VERSION: 1.94.1
+  CACHE_VERSION: v1
+
+jobs:
+  # ── CLI binaries (all 3 platforms) ─────────────────────────
+  build-cli:
+    name: CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: csq-linux-x86_64
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: csq-macos-aarch64
+            ext: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: csq-macos-x86_64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: csq-windows-x86_64.exe
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build CLI
+        run: cargo build --release -p csq-cli --target ${{ matrix.target }}
+        timeout-minutes: 30
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/csq${{ matrix.ext }}" "dist/${{ matrix.artifact }}"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            certutil -hashfile "${{ matrix.artifact }}" SHA256 | grep -v ":" | tr -d ' \r' > "${{ matrix.artifact }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.artifact }}" | awk '{print $1}' > "${{ matrix.artifact }}.sha256"
+          fi
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.artifact }}
+          path: dist/*
+
+  # ── Desktop artifacts (Tauri bundler, all 3 platforms) ────
+  build-desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-desktop-${{ env.CACHE_VERSION }}-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Linux system deps (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: csq-desktop/package-lock.json
+
+      - name: Install npm deps
+        working-directory: csq-desktop
+        run: npm ci
+
+      - name: Build desktop
+        working-directory: csq-desktop
+        run: npx @tauri-apps/cli build
+        timeout-minutes: 45
+
+      - name: Collect desktop artifacts
+        shell: bash
+        run: |
+          mkdir -p dist-desktop
+          # Tauri outputs land under target/release/bundle/<format>/
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            find target/release/bundle -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) -exec cp {} dist-desktop/ \;
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            find target/release/bundle -type f -name "*.dmg" -exec cp {} dist-desktop/ \;
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            find target/release/bundle -type f \( -name "*.msi" -o -name "*.exe" \) -exec cp {} dist-desktop/ \;
+          fi
+          # Rename to a predictable scheme: csq-desktop-<platform>.<ext>
+          cd dist-desktop
+          for f in *; do
+            ext="${f##*.}"
+            case "$ext" in
+              deb|rpm|AppImage|dmg|msi|exe)
+                mv "$f" "csq-desktop-${{ matrix.platform }}.${ext}"
+                ;;
+            esac
+          done
+          # Compute SHA256 for each remaining file
+          for f in csq-desktop-*; do
+            if [ -f "$f" ]; then
+              if [ "$RUNNER_OS" = "Windows" ]; then
+                certutil -hashfile "$f" SHA256 | grep -v ":" | tr -d ' \r' > "$f.sha256"
+              else
+                shasum -a 256 "$f" | awk '{print $1}' > "$f.sha256"
+              fi
+            fi
+          done
+          ls -la
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: dist-desktop/*
+
+  # ── Publish to GitHub Release ─────────────────────────────
+  release:
+    name: Publish release
+    needs: [build-cli, build-desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: Stage flattened assets
+        run: |
+          mkdir -p release-assets
+          find staging -type f -exec cp {} release-assets/ \;
+          # Build combined SHA256SUMS file
+          cd release-assets
+          if ls csq-* >/dev/null 2>&1; then
+            for f in csq-*; do
+              case "$f" in
+                *.sha256) ;;
+                *) echo "$(cat "${f}.sha256")  ${f}" >> SHA256SUMS ;;
+              esac
+            done
+          fi
+          # Remove per-file .sha256 (keep combined SHA256SUMS)
+          rm -f *.sha256
+          ls -la
+
+      - name: Upload assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+          fail_on_unmatched_files: true
