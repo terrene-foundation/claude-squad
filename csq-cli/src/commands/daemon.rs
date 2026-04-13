@@ -159,10 +159,19 @@ pub fn handle_start(base_dir: &Path) -> Result<()> {
                         daemon::spawn_auto_rotate(base_dir_for_runtime.clone(), shutdown.clone());
 
                     // Start the handle-dir sweep. Scans term-* dirs
-                    // every 60 seconds and removes orphans whose PID
-                    // is no longer alive.
+                    // every 60 seconds, preserves each dead dir's
+                    // per-session image cache to ~/.claude/image-cache/,
+                    // then removes the orphan. See journal 0035.
+                    //
+                    // If `claude_home()` cannot resolve `~/.claude`
+                    // (malformed $CLAUDE_HOME, missing $HOME), pass
+                    // `None` so the sweep still runs but skips
+                    // preservation rather than routing images into a
+                    // fallback path CC will never look at.
+                    let claude_home_for_sweep = super::claude_home().ok();
                     let sweep = csq_core::session::spawn_sweep(
                         base_dir_for_runtime.clone(),
+                        claude_home_for_sweep,
                         shutdown.clone(),
                     );
 
