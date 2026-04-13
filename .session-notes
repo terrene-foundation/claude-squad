@@ -1,62 +1,62 @@
-# Session Notes — csq v2.0 CI + redteam convergence + UX focus next
+# Session Notes — csq v2: Packaging + Installer + OAuth JSON Fix + Red Team Converged
 
 ## Read These Files First (in order)
 
-1. `workspaces/csq-v2/journal/0017-DISCOVERY-tracing-subscriber-log-facade-collision.md` — gotcha that would have panicked the desktop at startup; CI can't catch it
-2. `workspaces/csq-v2/journal/0018-DECISION-tray-swap-single-most-recent-dir.md` — tray quick-swap semantic + why credentials mtime not dir mtime
-3. `.github/workflows/test.yml` — 4-job CI (rust-test ×3 platforms, clippy, fmt, svelte-test) with `RUST_VERSION`/`CACHE_VERSION` env vars
-4. `rust-toolchain.toml` — pinned 1.94.1; bump in its own PR
-5. `csq-desktop/src-tauri/src/lib.rs` — dynamic tray menu, tracing+log dual setup, 14 new unit tests
-6. `csq-core/src/platform/lock.rs` — Windows Global\ probe with PID suffix + OnceLock cache
-7. `workspaces/csq-v2/todos/active/00-index.md` — updated completion state (95/112 tasks done)
+1. `workspaces/csq-v2/journal/0034-DISCOVERY-oauth-json-body-required.md` — Anthropic OAuth endpoint now requires JSON body; single most important session finding
+2. `workspaces/csq-v2/journal/0035-DISCOVERY-image-cache-per-config-dir-race.md` — why image-cache is NOT shared yet + the medium-term fix design the next session must implement
+3. `csq-core/src/credentials/refresh.rs` — JSON body build for token refresh; matches CC `vw8` exactly
+4. `csq-core/src/oauth/exchange.rs` — JSON body build for auth-code exchange; matches CC `Tw8` exactly
+5. `csq-core/src/broker/check.rs` — `BrokerResult::RateLimited` variant + `is_rate_limited` helper; skip sibling recovery on 429
+6. `csq-core/src/daemon/refresher.rs:321-347` — exhaustive match over BrokerResult; cooldown on RateLimited, clear on Valid/Refreshed/Recovered
+7. `csq-core/src/session/handle_dir.rs` + `isolation.rs` — 35-item SHARED_ITEMS list, `.claude.json` copy-with-cwd-scoped-projects, live-pid safety in create_handle_dir
+8. `csq-core/src/session/handle_dir.rs` `sweep_dead_handles` — where the next-session image-cache guard must hook in
+9. `install.sh` — curl-pipe downloader with anchored `validate_tag` regex
+10. `.github/workflows/release.yml` — tag-triggered release builds for 3 platforms, SHA256SUMS
+11. `README.md` — platform-tabbed install instructions (CLI + desktop)
 
-## Accomplished (this session)
+## Accomplished
 
-- **PR #64 merged** — M11 CLI tools + H1 SecretString wrapper for 3P API keys
-- **PR #65 merged** — CI pipeline + 5-pass red team convergence, 30 findings fixed
-- **486 Rust tests** + 13 Svelte tests, **zero clippy**, **all 3 platforms green** (macOS/Ubuntu/Windows)
-- **Windows lock fix** — `CreateMutexW` with PID-probed Global\ → Local\ fallback, cached in `OnceLock`
-- **Dynamic tray menu** — accounts discovered every 30s, click serialized via `SWAP_IN_FLIGHT`, labels bidi-sanitized
-- **Release-mode logging** — tracing-subscriber (stderr) + tauri-plugin-log (os log dir) coexist cleanly
-- **Todo checkboxes** — marked 95 of 112 tasks complete across all milestones
-- **Journals 0017, 0018** committed
+- **PR #84 merged** (`cba7cbb`) — handle-dir resilience: expanded SHARED_ITEMS 10→35, `.claude.json` CWD-scoped copy, `create_handle_dir` live-pid safety check
+- **PR #85 merged** (`45fe239`) — README Install section rewritten
+- **PR #86 merged** (`4f3274a`) — packaging + installer + T1/T2 test gaps + OAuth refresh JSON fix; **red team converged in 4 rounds**
+- **v2.0.0-alpha.2 released** — tagged and published on GitHub
+- **Auto-refresh mass-failure root-caused**: Anthropic's `/v1/oauth/token` switched to JSON-only. All 7 accounts were failing with `400 invalid_request_error`. Fixed by building JSON body with `client_id` + `scope`. Removed retry-in-loop from both `refresh_token` and `exchange_code` — amplified rate-limit cascades.
+- **`BrokerResult::RateLimited`** — distinct from `Skipped` so refresher sets cooldown correctly on 429
+- **Linux .deb/.rpm/AppImage + Windows .msi + macOS .dmg** — Tauri bundler targets wired in `tauri.conf.json`; release workflow builds all three platforms on `v*` tag push
+- **`install.sh` curl-pipe** — platform detect, anchored semver regex (rejects path traversal, shell metachars, newline injection), exact `awk` field-match for SHA256, tag-vs-asset 404 distinction, pre-release fallback warning
+- **T1/T2 test gaps closed** — `download_and_apply_to` with injectable path, `run_update_check_with` with injectable transport + notice sink; 4 new tests
+- **Azure signup completed** — resource group `csq-signing-rg` in `eastus`, logged in as `jack@terrene.foundation` on "terrene foundation" tenant. No billable resources created. Code signing deferred.
 
-## Outstanding — Next Session (UX FOCUS)
+## Outstanding
 
-User explicitly flagged **clunky UX as critical** for the next session. Work priority:
-
-- [ ] **Desktop OAuth flow** — `csq-desktop/src-tauri/src/commands.rs:168` `start_login` currently tells the user "Run `csq login N` in your terminal". Wire the actual OAuth callback listener + browser open in-process via `csq_core::oauth::start_login` + `daemon::oauth_callback::serve` (port 8420) so the user clicks "Add Account" and a browser opens.
-- [ ] **Dashboard account list wiring** — verify `get_accounts` IPC data renders correctly in `csq-desktop/src/lib/components/AccountList.svelte`; polish quota bars, token health badges, error states.
-- [ ] **Toast / error surface** — `tray-swap-complete` event is emitted but no frontend listener. Add a toast component that listens for swap success/failure.
-- [ ] **Status dashboard first paint** — measure cold-start time to first meaningful data; preload via `get_accounts` during splash.
-- [ ] **Tray icon states** — show a different icon when any account is expiring or out of quota.
-
-Secondary (not UX but unblocked):
-
-- [ ] **M7-10 `csq update`** — GitHub Releases API, Ed25519 sig verify, atomic binary swap. Spec at `workspaces/csq-v2/todos/active/M7-providers-cli.md:115-128`.
-- [ ] **M8-03 Windows named-pipe IPC** — now that Windows CI is green, build `tokio::net::windows::named_pipe` HTTP transport. Spec at `workspaces/csq-v2/todos/active/M8-daemon-core.md:36-46`.
-- [ ] **M11-05 Linux packaging** — tauri-bundler already configured; wire CI release job for `.deb`/`.rpm`/AppImage on tag push.
-- [ ] **M11-06 curl-pipe installer** — shell script with platform detect; depends on release artifacts existing.
+- [ ] **`image-cache` medium-term fix (USER REQUESTED FOR NEXT SESSION)** — write a cleanup guard in `csq-core/src/session/handle_dir.rs` `sweep_dead_handles` that moves `term-<pid>/image-cache/<session-id>/` into `~/.claude/image-cache/<session-id>/` before removing the dead dir. Do NOT add `image-cache` to `SHARED_ITEMS` — CC's `Dv7` cleanup races on shared dirs. See journal 0035 for the design.
+- [ ] **`csq repair-sessions` command** — 1651 session JSONL files exist under wrong project dirs (their `cwd` field doesn't match the encoded dir name). 21 are loom/kailash-rs sessions misfiled under loom/. Build `csq repair-sessions` that finds mis-filed files and moves them to the correct project dir based on their first-line `cwd`.
+- [ ] **Replace placeholder Ed25519 key** — `csq-core/src/update/verify.rs:58-64`. Blocked on Foundation key provisioning.
+- [ ] **Pin GitHub Actions by SHA** — `.github/workflows/release.yml` pins `softprops/action-gh-release@v2` and `dtolnay/rust-toolchain@master` by mutable refs. Red team round 1 M1.
+- [ ] **Out-of-band signing of SHA256SUMS** — follow-up: `cosign sign-blob` step. Red team round 1 M2.
+- [ ] **Pre-existing flaky test** — `tick_3p_zai_polls_and_writes_quota` fails in isolation but not in `cargo test --workspace` parallel run. Not a regression from this session.
 
 ## Oversight — Verify Before Starting
 
-- [ ] `git log --oneline -5` — HEAD should include `8847148` + `271fdf6` (PR #65 merge)
-- [ ] `cargo test --workspace 2>&1 | grep "test result"` — expect **486 Rust tests**, zero failures
-- [ ] `cd csq-desktop && npx vitest run` — expect **13 Svelte tests**
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings
+- [ ] `git log --oneline -5` — HEAD should include `4f3274a` (PR #86 merge)
+- [ ] `csq --version` → `csq 2.0.0-alpha.2`
+- [ ] `cargo test --workspace` — 586 passed, 1 pre-existing zai flake
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` — zero
 - [ ] `cargo fmt --all -- --check` — zero drift
+- [ ] Daemon alive: `cat ~/.claude/accounts/csq-daemon.pid` returns a live PID
+- [ ] All 7 accounts healthy: 400+ minutes token remaining
+- [ ] No broker-failed markers: `ls ~/.claude/accounts/credentials/*.broker-failed` errors "no matches"
 
-## Oversight — Verify After Any New Work
+## Oversight — Verify After Completing
 
-- [ ] 486+ Rust tests still pass; new UX work ideally adds Svelte component tests
-- [ ] No new `let _ =` on Result types (zero-tolerance rule 3)
-- [ ] `security-reviewer` agent pass if OAuth flow touched
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` still green
-- [ ] `cargo fmt --all` before commit (CI has a `fmt` job now)
-- [ ] CI green on all 3 platforms before `gh pr merge --admin`
+- [ ] `cargo test --workspace` — no new regressions beyond the zai flake
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` — zero
+- [ ] `cargo fmt --all -- --check` — zero drift
+- [ ] Image cache test: paste image in a handle-dir terminal, exit, verify image survives into `~/.claude/image-cache/<session-id>/` after daemon sweep removes the dead dir
+- [ ] Red team convergence: run 2 consecutive clean rounds before opening the PR
 
 ## Blockers
 
-1. **Apple Developer account ($99/yr)** — user setting up; blocks M11-01 signing, M11-03 Homebrew, M11-11 smoke tests
-2. **Windows Authenticode cert** — blocks M11-02; not time-critical
-3. **Unsigned pre-release plan** — user wants to ship unsigned pre-releases ONCE enough features land to be usefully testable. Criteria: desktop OAuth works end-to-end + dashboard shows live account data + tray quick-swap verified by users. Implies UX work must complete first.
+1. **Apple Developer cert** — blocks macOS desktop signing. User decided source-only, no action.
+2. **Azure Trusted Signing** — blocks Windows signing. ~$9.99/mo, not yet funded. User decided source-only, no action.
+3. **Foundation Ed25519 signing key** — blocks replacing the placeholder in `csq-core/src/update/verify.rs`. Needs Foundation decision to generate + publish.
