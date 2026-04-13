@@ -636,15 +636,15 @@ pub async fn submit_oauth_code(
         .consume(&state_token)
         .map_err(|e| format!("no matching login: {e}"))?;
 
-    // Run the blocking token exchange on a worker thread so we don't
-    // freeze the Tauri event loop during the HTTP call + retries.
+    // Run the blocking token exchange on a worker thread so we
+    // don't freeze the Tauri event loop during the HTTP call.
     let base_dir_clone = base_dir.clone();
     tokio::task::spawn_blocking(move || {
         let credential = exchange_code(
             &code,
             &pending.code_verifier,
             PASTE_CODE_REDIRECT_URI,
-            csq_core::http::post_form_params,
+            csq_core::http::post_json,
         )
         .map_err(|e| format!("exchange failed: {e}"))?;
 

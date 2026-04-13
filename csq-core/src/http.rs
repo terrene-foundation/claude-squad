@@ -197,23 +197,6 @@ pub fn post_json(url: &str, body: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-/// POSTs form-encoded key-value pairs using reqwest's built-in form
-/// serialization. This correctly handles `application/x-www-form-urlencoded`
-/// encoding per the WHATWG URL standard (spaces as `+`, proper escaping).
-///
-/// Use this instead of manual `urlencoding::encode` + `post_form` for
-/// OAuth token exchanges where encoding correctness is critical.
-pub fn post_form_params(url: &str, params: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let response = client()
-        .post(url)
-        .form(&params)
-        .send()
-        .map_err(sanitize_err)?;
-
-    let bytes = response.bytes().map_err(sanitize_err)?;
-    Ok(bytes.to_vec())
-}
-
 /// POSTs a JSON body with custom headers. Returns `(status, body)`.
 ///
 /// This signature matches `providers::validate::validate_key`'s

@@ -1,140 +1,225 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Code Session Quota (csq) installer — multi-account rotation for Claude Code
-# macOS / Linux / WSL / Git Bash on Windows
-# Install: curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
+# Code Session Quota (csq) installer
+#
+# Downloads the latest csq CLI binary from GitHub Releases for the host
+# platform, verifies its SHA256 against the release's SHA256SUMS file,
+# and installs it to ~/.local/bin/csq.
+#
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
+#
+# Or with a specific version:
+#   curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | CSQ_VERSION=v2.0.0-alpha.3 bash
+#
+# Options (env vars):
+#   CSQ_VERSION  — tag to install (default: latest)
+#   CSQ_BIN_DIR  — install directory (default: ~/.local/bin or ~/bin if on $PATH)
+#   CSQ_NO_VERIFY — if set to 1, skip SHA256 verification (NOT RECOMMENDED)
 
-REPO_URL="https://raw.githubusercontent.com/terrene-foundation/csq/main"
-ACCOUNTS_DIR="$HOME/.claude/accounts"
-if [[ -d "$HOME/bin" ]] && echo "$PATH" | grep -q "$HOME/bin"; then
-    BIN_DIR="$HOME/bin"
-else
-    BIN_DIR="$HOME/.local/bin"
-fi
+REPO="terrene-foundation/csq"
+CSQ_VERSION="${CSQ_VERSION:-latest}"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
-ok()   { echo -e "${GREEN}✓${NC} $*"; }
-warn() { echo -e "${YELLOW}!${NC} $*"; }
-err()  { echo -e "${RED}✗${NC} $*" >&2; }
+ok()   { printf "${GREEN}✓${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}!${NC} %s\n" "$*"; }
+err()  { printf "${RED}✗${NC} %s\n" "$*" >&2; }
+info() { printf "${BOLD}%s${NC}\n" "$*"; }
 
-# ─── Platform detection ─────────────────────────────────
+# ─── Detect platform ──────────────────────────────────────
 detect_platform() {
+    local os arch
     case "$(uname -s)" in
-        Darwin) echo "macos" ;;
-        Linux)
-            if grep -qi microsoft /proc/version 2>/dev/null; then
-                echo "wsl"
-            else
-                echo "linux"
-            fi ;;
-        MINGW*|MSYS*|CYGWIN*) echo "git-bash" ;;
-        *) echo "unknown" ;;
+        Darwin) os="macos" ;;
+        Linux)  os="linux" ;;
+        MINGW*|MSYS*|CYGWIN*)
+            err "Windows is not supported by this script. Build from source:"
+            err "  https://github.com/${REPO}#cli"
+            exit 1
+            ;;
+        *) err "unsupported OS: $(uname -s)"; exit 1 ;;
     esac
+
+    case "$(uname -m)" in
+        x86_64|amd64)    arch="x86_64" ;;
+        arm64|aarch64)
+            if [ "$os" = "linux" ]; then
+                err "Linux aarch64 is not yet published. Build from source:"
+                err "  https://github.com/${REPO}#cli"
+                exit 1
+            fi
+            arch="aarch64"
+            ;;
+        *) err "unsupported architecture: $(uname -m)"; exit 1 ;;
+    esac
+
+    echo "${os}-${arch}"
 }
-PLATFORM=$(detect_platform)
 
-echo -e "\n${BOLD}Claude Squad — Multi-Account Rotation for Claude Code${NC}\n"
-echo -e "Platform: ${BOLD}${PLATFORM}${NC}\n"
-
-# ─── Prerequisites ──────────────────────────────────────
-command -v claude &>/dev/null || { err "Claude Code not found. Install: https://docs.anthropic.com/en/docs/claude-code"; exit 1; }
-
-if ! command -v jq &>/dev/null; then
-    warn "jq not found — statusline will not show quota."
-fi
-
-mkdir -p "$ACCOUNTS_DIR/credentials" "$BIN_DIR"
-
-# chmod is a no-op on Windows (NTFS profile dirs are user-private already)
-if [[ "$PLATFORM" != "git-bash" ]]; then
-    chmod 700 "$ACCOUNTS_DIR" "$ACCOUNTS_DIR/credentials"
-fi
-
-# ─── Install files ──────────────────────────────────────
-if [[ -f "$(dirname "$0")/statusline-quota.sh" ]]; then
-    SRC="$(cd "$(dirname "$0")" && pwd)"
-    cp "$SRC/statusline-quota.sh" "$ACCOUNTS_DIR/statusline-quota.sh"
-    # Copy the csq binary if built
-    if [[ -x "$SRC/target/debug/csq-cli" ]]; then
-        cp "$SRC/target/debug/csq-cli" "$BIN_DIR/csq"
-    elif [[ -x "$SRC/target/release/csq-cli" ]]; then
-        cp "$SRC/target/release/csq-cli" "$BIN_DIR/csq"
+# ─── Pick install directory ──────────────────────────────
+pick_bin_dir() {
+    if [ -n "${CSQ_BIN_DIR:-}" ]; then
+        echo "$CSQ_BIN_DIR"
+        return
     fi
-    for doc in 3p-model-primer.md 3p-model-primer-prepend.md; do
-        [[ -f "$SRC/$doc" ]] && cp "$SRC/$doc" "$ACCOUNTS_DIR/$doc"
-    done
-else
-    curl -sfL "$REPO_URL/statusline-quota.sh" -o "$ACCOUNTS_DIR/statusline-quota.sh"
-    curl -sfL "$REPO_URL/3p-model-primer.md" -o "$ACCOUNTS_DIR/3p-model-primer.md"
-    curl -sfL "$REPO_URL/3p-model-primer-prepend.md" -o "$ACCOUNTS_DIR/3p-model-primer-prepend.md"
-fi
 
-# auto-rotate-hook.sh: write a no-op so any pre-existing UserPromptSubmit
-# hook entry in settings.json doesn't ENOENT.
-cat > "$ACCOUNTS_DIR/auto-rotate-hook.sh" << 'AUTOROTATEHOOK'
-#!/usr/bin/env bash
-# Auto-rotation hook — DISABLED (no-op).
-exit 0
-AUTOROTATEHOOK
+    if [ -d "$HOME/bin" ] && echo ":$PATH:" | grep -q ":$HOME/bin:"; then
+        echo "$HOME/bin"
+    else
+        echo "$HOME/.local/bin"
+    fi
+}
 
-# Clean up legacy Python artifacts
-rm -f "$ACCOUNTS_DIR/rotation-engine.py" 2>/dev/null || true
-rm -f "$HOME/.claude/statusline-command.sh" 2>/dev/null || true
-rm -f "$HOME/.claude/commands/rotate.md" 2>/dev/null || true
+# ─── Resolve tag to download from ────────────────────────
 
-if [[ "$PLATFORM" != "git-bash" ]]; then
-    chmod +x "$ACCOUNTS_DIR/statusline-quota.sh" \
-             "$ACCOUNTS_DIR/auto-rotate-hook.sh"
-    [[ -x "$BIN_DIR/csq" ]] && chmod +x "$BIN_DIR/csq"
-fi
-ok "Files installed"
+# Validates that a tag name looks like a semver release. Rejects
+# arbitrary characters that could alter the download path or
+# resolve to an unexpected artifact.
+#
+# Bash `case` globs use `*` as "any char including /, ;, newline",
+# which is too permissive here — we use a strict `=~` regex anchor
+# so only vMAJOR.MINOR.PATCH[-prerelease] shapes pass.
+validate_tag() {
+    local tag="$1"
+    if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+        err "refusing unexpected tag name: '$tag'"
+        err "  expected format: vMAJOR.MINOR.PATCH[-prerelease]"
+        exit 1
+    fi
+}
 
-# Remove old 'cc' binary if it exists (renamed to csq)
-rm -f "$BIN_DIR/cc" 2>/dev/null
+resolve_tag() {
+    if [ "$CSQ_VERSION" != "latest" ]; then
+        validate_tag "$CSQ_VERSION"
+        echo "$CSQ_VERSION"
+        return
+    fi
+    # The GitHub API returns the latest STABLE release by default.
+    local tag
+    tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/')
+    if [ -z "$tag" ]; then
+        # No stable releases yet — csq is in alpha. Fall back to
+        # the most recent pre-release, but warn loudly so the user
+        # understands they're getting an unstable build.
+        warn "no stable release found for ${REPO}"
+        warn "falling back to the latest PRE-RELEASE (alpha/beta/rc)"
+        warn "pin with CSQ_VERSION=vX.Y.Z to install a specific version"
+        tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
+            | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+            | head -1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')
+    fi
+    if [ -z "$tag" ]; then
+        err "could not resolve latest csq version from GitHub API"
+        err "  set CSQ_VERSION=vX.Y.Z to install a specific version"
+        exit 1
+    fi
+    validate_tag "$tag"
+    echo "$tag"
+}
 
-# ─── Config dirs ────────────────────────────────────────
-for n in 1 2 3 4 5 6 7; do
-    mkdir -p "$ACCOUNTS_DIR/config-$n"
-done
-ok "Config dirs created"
+# ─── Download + verify + install ──────────────────────────
+main() {
+    info "Code Session Quota (csq) installer"
+    echo
 
-case "$PLATFORM" in
-    macos) ok "Credential storage: macOS Keychain + file fallback" ;;
-    linux|wsl) ok "Credential storage: file-only (no keychain on Linux)" ;;
-    git-bash) ok "Credential storage: file-only (no keychain on Windows)" ;;
-esac
+    command -v curl >/dev/null 2>&1 || { err "curl is required"; exit 1; }
+    command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 || {
+        err "shasum or sha256sum is required"
+        exit 1
+    }
 
-# ─── Patch settings.json ────────────────────────────────
-SETTINGS_FILE="$HOME/.claude/settings.json"
-[[ -f "$SETTINGS_FILE" ]] || echo '{}' > "$SETTINGS_FILE"
+    local platform tag bin_dir artifact url checksum_url tmp
+    platform=$(detect_platform)
+    tag=$(resolve_tag)
+    bin_dir=$(pick_bin_dir)
+    artifact="csq-${platform}"
+    url="https://github.com/${REPO}/releases/download/${tag}/${artifact}"
+    checksum_url="https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS"
 
-# Use jq if available, otherwise basic sed approach
-if command -v jq &>/dev/null; then
-    desired_sl_cmd='bash ~/.claude/accounts/statusline-quota.sh'
-    tmp_settings=$(mktemp)
-    jq --arg cmd "$desired_sl_cmd" '.statusLine = {"type":"command","command":$cmd}' "$SETTINGS_FILE" > "$tmp_settings" 2>/dev/null && mv "$tmp_settings" "$SETTINGS_FILE"
-    rm -f "$tmp_settings" 2>/dev/null
-fi
-ok "Settings configured (statusline)"
+    echo "  Platform: ${BOLD}${platform}${NC}"
+    echo "  Version:  ${BOLD}${tag}${NC}"
+    echo "  Target:   ${BOLD}${bin_dir}/csq${NC}"
+    echo
 
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-    warn "$BIN_DIR not in PATH. Add to your shell profile:"
-    echo "    export PATH=\"$BIN_DIR:\$PATH\""
-fi
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
 
-echo -e "\n${BOLD}Done.${NC} Now save your accounts:\n"
-echo "  1. Start Claude:   claude"
-echo "  2. Log in:          /login email@example.com"
-echo "  3. Save it:         ! csq login 1"
-echo "  4. Repeat for each account (slots 1-7)"
-echo ""
-echo "Daily use:"
-echo "  csq run 1           Start CC on account 1 (isolated)"
-echo "  csq run 3           Start CC on account 3 (separate terminal)"
-echo "  csq status          Show all accounts + quota"
-echo ""
-echo "When rate limited (inside CC):"
-echo "  ! csq swap N         Swap THIS terminal to account N (no restart, same conversation)"
-echo "  ! csq suggest        Show which account has the most quota"
-echo ""
+    # Distinguish "tag does not exist" from "asset not in this
+    # release" so the user gets an actionable error. We resolved
+    # `tag` above; check the tag's release page first.
+    info "Verifying tag ${tag} exists..."
+    local tag_status
+    tag_status=$(curl -fsI -o /dev/null -w "%{http_code}" \
+        "https://api.github.com/repos/${REPO}/releases/tags/${tag}" 2>/dev/null || echo "000")
+    if [ "$tag_status" = "404" ]; then
+        err "tag ${tag} not found in ${REPO}"
+        err "  list releases:   https://github.com/${REPO}/releases"
+        err "  build from source: https://github.com/${REPO}#cli--from-source"
+        exit 1
+    fi
+
+    info "Downloading ${artifact}..."
+    if ! curl -fsSL -o "$tmp/$artifact" "$url"; then
+        err "no ${artifact} asset in release ${tag}"
+        err "  your platform may not be published for this version"
+        err "  build from source: https://github.com/${REPO}#cli--from-source"
+        exit 1
+    fi
+
+    if [ "${CSQ_NO_VERIFY:-0}" = "1" ]; then
+        warn "skipping SHA256 verification (CSQ_NO_VERIFY=1)"
+    else
+        info "Verifying SHA256..."
+        if ! curl -fsSL -o "$tmp/SHA256SUMS" "$checksum_url"; then
+            err "failed to download SHA256SUMS"
+            exit 1
+        fi
+
+        local expected actual
+        # Use awk field-match instead of grep substring to avoid
+        # false matches on filenames that share a suffix.
+        expected=$(awk -v a="$artifact" '$2 == a {print $1}' "$tmp/SHA256SUMS")
+        if [ -z "$expected" ]; then
+            err "SHA256SUMS does not contain an entry for ${artifact}"
+            exit 1
+        fi
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$tmp/$artifact" | awk '{print $1}')
+        else
+            actual=$(shasum -a 256 "$tmp/$artifact" | awk '{print $1}')
+        fi
+
+        if [ "$actual" != "$expected" ]; then
+            err "SHA256 mismatch for ${artifact}"
+            err "  expected: $expected"
+            err "  actual:   $actual"
+            err "  (this is a SECURITY failure — refusing to install)"
+            exit 1
+        fi
+        ok "SHA256 verified"
+    fi
+
+    mkdir -p "$bin_dir"
+    install -m 0755 "$tmp/$artifact" "$bin_dir/csq"
+    ok "Installed csq to ${bin_dir}/csq"
+
+    echo
+    if echo ":$PATH:" | grep -q ":$bin_dir:"; then
+        info "Next steps:"
+        echo "  csq --version         # verify install"
+        echo "  csq doctor            # run diagnostics"
+        echo "  csq login 1           # authenticate your first account"
+    else
+        warn "$bin_dir is not on your PATH."
+        echo "  Add this to your shell rc file:"
+        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
+}
+
+main "$@"

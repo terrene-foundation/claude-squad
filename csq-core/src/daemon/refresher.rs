@@ -110,6 +110,7 @@ impl RefreshStatus {
             BrokerResult::Valid => "valid",
             BrokerResult::Refreshed => "refreshed",
             BrokerResult::Skipped => "skipped",
+            BrokerResult::RateLimited => "rate_limited",
             BrokerResult::Recovered => "recovered",
             BrokerResult::Failed(_) => "failed",
         };
@@ -317,11 +318,33 @@ pub(crate) async fn tick(
         match result {
             Ok(Ok(broker_result)) => {
                 let status = RefreshStatus::from_result(account, expires_at_ms, &broker_result);
-                if matches!(broker_result, BrokerResult::Failed(_)) {
-                    warn!(account = info.id, "refresh failed, entering cooldown");
-                    set_cooldown(cooldowns, info.id);
-                } else {
-                    clear_cooldown(cooldowns, info.id);
+                match &broker_result {
+                    BrokerResult::Failed(_) => {
+                        warn!(account = info.id, "refresh failed, entering cooldown");
+                        set_cooldown(cooldowns, info.id);
+                    }
+                    BrokerResult::RateLimited => {
+                        // Rate-limited by Anthropic. Set a cooldown
+                        // so the next tick does not hit the endpoint
+                        // again immediately. Do NOT clear any
+                        // existing cooldown. This is the whole
+                        // point of distinguishing RateLimited from
+                        // Skipped — a plain `Skipped` (lock held
+                        // by another process) is safe to clear on,
+                        // a `RateLimited` is not.
+                        warn!(account = info.id, "refresh rate limited, entering cooldown");
+                        set_cooldown(cooldowns, info.id);
+                    }
+                    BrokerResult::Skipped => {
+                        // Another process holds the refresh lock.
+                        // Leave any existing cooldown alone and
+                        // proceed — we'll pick up the refreshed
+                        // credentials on the next tick via the
+                        // re-read-inside-lock path in broker_check.
+                    }
+                    BrokerResult::Valid | BrokerResult::Refreshed | BrokerResult::Recovered => {
+                        clear_cooldown(cooldowns, info.id);
+                    }
                 }
                 cache.set(info.id, status);
                 processed += 1;
