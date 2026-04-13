@@ -23,15 +23,36 @@ Multi-provider session manager for Claude Code. Run Claude Code against local mo
 
 ## Install
 
-csq ships **unsigned** binaries for all three platforms (no Apple Developer ID, no Authenticode — the recurring cost isn't justified for an alpha release). The CLI works identically to a signed build; the desktop app triggers a one-time warning on first launch that you have to bypass.
+csq ships **unsigned, unnotarized** binaries for all three platforms (no Apple Developer ID, no Authenticode — the recurring cost isn't justified for an alpha release). The CLI works identically to a signed build; the desktop app triggers a one-time Gatekeeper warning on first launch that you have to bypass.
 
-**macOS first-launch bypass** (from `v2.0.0-alpha.5` onward, the `.app` is ad-hoc signed so you get a proper bypass, not the older "file is damaged" dead-end):
+**macOS first-launch bypass** — fastest path (one terminal command):
 
-1. Mount the `.dmg` and drag the `.app` to `/Applications/` as usual
-2. **Right-click** `Code Session Quota.app` in Finder → **Open** → click **Open** on the dialog
-3. From then on, double-click works normally
+```bash
+xattr -cr "/Applications/Code Session Quota.app"
+open "/Applications/Code Session Quota.app"
+```
 
-If you see **"file is damaged and can't be opened"** (only happens with binaries from `v2.0.0-alpha.4` or earlier), your copy has the broken Tauri bundler signature. Run this once:
+This clears the `com.apple.quarantine` extended attribute the browser
+attaches on download, which is the only thing triggering Gatekeeper.
+After that the app launches normally and every subsequent launch is
+a plain double-click.
+
+**macOS first-launch bypass** — System Settings path (no terminal):
+
+1. Mount the `.dmg`, drag the `.app` to `/Applications/` as usual
+2. Double-click the app. You'll see **"Apple could not verify `Code Session Quota` is free of malware..."** — click **Done**
+3. Open **System Settings** → **Privacy & Security** → scroll to the **Security** section near the bottom
+4. You'll see _"Code Session Quota was blocked from use because it is not from an identified developer."_ — click **Open Anyway**
+5. Enter your password, confirm; from then on double-click works
+
+> The classic "right-click → Open → Open" bypass **no longer works on
+> macOS Sonoma+** for unnotarized apps — Apple removed that path in 2023. System Settings is now the only UI bypass, or use the `xattr`
+> command above.
+
+**If you see "file is damaged and can't be opened"** — that's the old
+`v2.0.0-alpha.4` bundle with a broken Tauri bundler signature. Upgrade
+to `v2.0.0-alpha.5` or later; or run this once as a one-shot fix on
+the damaged copy:
 
 ```bash
 xattr -cr "/Applications/Code Session Quota.app"
