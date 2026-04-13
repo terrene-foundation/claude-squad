@@ -155,6 +155,56 @@ jobs:
         run: npx @tauri-apps/cli build
         timeout-minutes: 45
 
+      - name: Ad-hoc re-sign macOS .app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Tauri's bundler leaves the .app with a Mach-O linker
+          # signature on the inner binary but NO Contents/_CodeSignature/
+          # CodeResources seal on the bundle itself. Gatekeeper reads
+          # this as "code has no resources but signature indicates
+          # they must be present" and shows the user a misleading
+          # "app is damaged" error.
+          #
+          # Re-sign with `codesign --force --deep --sign -` (ad-hoc)
+          # to regenerate CodeResources. This is not a trusted
+          # signature (no Apple Developer ID), so users on first
+          # launch will still need to right-click → Open once —
+          # but they'll see "developer cannot be verified" with a
+          # working bypass instead of "damaged" with no bypass.
+          APP_BUNDLE=$(find target/release/bundle/macos -maxdepth 2 -name "*.app" -type d | head -1)
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "::error::no .app bundle found under target/release/bundle/macos/"
+            exit 1
+          fi
+          echo "Re-signing: $APP_BUNDLE"
+          codesign --force --deep --sign - "$APP_BUNDLE"
+          codesign --verify --deep --strict "$APP_BUNDLE"
+          echo "Signature verified."
+
+          # Rebuild the DMG around the re-signed app so the DMG's
+          # inner .app has the coherent signature. Tauri's DMG step
+          # already ran (producing an unsigned DMG); we need to
+          # re-create it with hdiutil around the now-signed .app.
+          DMG_PATH=$(find target/release/bundle/dmg -maxdepth 2 -name "*.dmg" -type f | head -1)
+          if [ -n "$DMG_PATH" ]; then
+            echo "Rebuilding DMG: $DMG_PATH"
+            TMP_DMG_DIR=$(mktemp -d)
+            cp -R "$APP_BUNDLE" "$TMP_DMG_DIR/"
+            # Add a symlink to /Applications so the drag-install UX
+            # works the same as the Tauri-built DMG.
+            ln -s /Applications "$TMP_DMG_DIR/Applications"
+            rm "$DMG_PATH"
+            hdiutil create \
+              -volname "Code Session Quota" \
+              -srcfolder "$TMP_DMG_DIR" \
+              -ov \
+              -format UDZO \
+              "$DMG_PATH"
+            rm -rf "$TMP_DMG_DIR"
+            echo "DMG rebuilt at $DMG_PATH"
+          fi
+
       - name: Collect desktop artifacts
         shell: bash
         run: |

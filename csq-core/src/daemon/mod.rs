@@ -54,8 +54,8 @@ pub use usage_poller::{spawn as spawn_usage_poller, HttpGetFn, HttpPostProbeFn, 
 
 #[cfg(unix)]
 pub use client::{
-    http_get_unix, http_get_unix_with_timeout, http_post_unix, DaemonClientError, DaemonResponse,
-    DEFAULT_TIMEOUT,
+    http_get_unix, http_get_unix_with_timeout, http_post_unix, http_post_unix_json,
+    DaemonClientError, DaemonResponse, DEFAULT_TIMEOUT,
 };
 // Cross-platform router types.
 pub use server::{router, HealthResponse, ServerHandle};

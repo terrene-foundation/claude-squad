@@ -81,7 +81,7 @@ Then add `%USERPROFILE%\.local\bin` to `PATH` if it isn't already.
 After install:
 
 ```bash
-csq --version    # should print: csq 2.0.0-alpha.4
+csq --version    # should print: csq 2.0.0-alpha.5
 csq doctor       # runs diagnostics
 csq login 1      # authenticate your first account
 ```
@@ -198,7 +198,7 @@ pip uninstall csq    # if you used pip
 
 # Install the current Rust binary
 curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
-csq --version    # csq 2.0.0-alpha.4
+csq --version    # csq 2.0.0-alpha.5
 ```
 
 Your accounts at `~/.claude/accounts/credentials/N.json` are picked
@@ -223,14 +223,14 @@ auto-update works for every subsequent release:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/terrene-foundation/csq/main/install.sh | bash
-csq --version    # csq 2.0.0-alpha.4
+csq --version    # csq 2.0.0-alpha.5
 csq update check # should now report up-to-date
 ```
 
 After this one-shot upgrade, the canonical path is `csq update install`
 (see below) — you won't need the curl-pipe again.
 
-### From `v2.0.0-alpha.4` or later — `csq update install`
+### From `v2.0.0-alpha.5` or later — `csq update install`
 
 Once you're on `alpha.4` or later, csq verifies releases against the
 Foundation's Ed25519 signing key and can upgrade itself in place:
