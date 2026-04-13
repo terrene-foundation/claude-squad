@@ -152,8 +152,10 @@ impl std::fmt::Debug for TokenResponse {
 /// - `redirect_uri` — the exact redirect URI that was sent to the
 ///   authorize endpoint. Must be byte-identical.
 /// - `http_post` — transport closure. Production callers pass
-///   `csq_core::http::post_form` (form-encoded, matching the
-///   OAuth 2.0 spec and the refresh path).
+///   `csq_core::http::post_json`. Anthropic's `/v1/oauth/token`
+///   endpoint requires a JSON body with `client_id` + `scope` as
+///   of 2026-04; form-encoded bodies are rejected with
+///   `400 invalid_request_error`. See journal 0034.
 ///
 /// # Errors
 ///
@@ -186,30 +188,22 @@ where
         "code_verifier": verifier.expose_secret(),
         "redirect_uri": redirect_uri,
     });
+    // Serialize the body. The `expect` is safe because every input
+    // is a static &str or verifier/code string — there's no
+    // Serialize impl in the input that can fail.
     let body_str = serde_json::to_string(&body)
-        .map_err(|e| OAuthError::Exchange(format!("json serialize: {e}")))?;
+        .expect("exchange_code: static JSON should never fail to serialize");
 
-    // Retry with backoff on 429 (rate limit). Anthropic's token
-    // endpoint has aggressive rate limiting — a burst of login
-    // attempts (e.g., re-authing 8 accounts) can trigger it.
-    let mut response_bytes = Vec::new();
-    let delays = [0, 2, 5, 10]; // seconds to wait before each attempt
-    for (attempt, delay) in delays.iter().enumerate() {
-        if *delay > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(*delay));
-        }
-
-        response_bytes = http_post(OAUTH_TOKEN_URL, &body_str)
-            .map_err(|e| OAuthError::Exchange(redact_tokens(&e)))?;
-
-        // Check for rate limit (429) — retry if we have attempts left
-        if let Some(detail) = extract_oauth_error(&response_bytes) {
-            if detail.contains("rate_limit") && attempt < delays.len() - 1 {
-                continue;
-            }
-        }
-        break;
-    }
+    // Single-shot exchange. We do NOT retry inside this function
+    // even on 429. Retrying in-loop amplifies the rate-limit
+    // condition that the retry was supposed to absorb — the user
+    // who hit the 429 is already at the endpoint's throttle edge,
+    // and firing another request at it in 2s makes everything
+    // worse. If the exchange fails, the login flow surfaces the
+    // error to the user and they can retry at human cadence.
+    // See journal 0034.
+    let response_bytes = http_post(OAUTH_TOKEN_URL, &body_str)
+        .map_err(|e| OAuthError::Exchange(redact_tokens(&e)))?;
 
     // Try to deserialize as a success response. If that fails,
     // check whether the server returned a structured error

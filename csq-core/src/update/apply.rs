@@ -60,11 +60,16 @@ where
     download_and_apply_to(info, &binary_path, http_get)
 }
 
-/// Inner helper that accepts an explicit target binary path so tests can
-/// exercise the full verify + atomic-replace pipeline without pointing at
-/// the real test binary. Callers in production should use
-/// [`download_and_apply`] which resolves the current binary automatically.
-pub fn download_and_apply_to<F>(
+/// Inner helper that accepts an explicit target binary path so
+/// tests can exercise the full verify + atomic-replace pipeline
+/// without pointing at the real test binary. Callers in production
+/// MUST use [`download_and_apply`] which resolves the current
+/// binary via `current_exe()`. This is `pub(crate)` so an
+/// out-of-crate caller cannot pass an arbitrary `binary_path` and
+/// turn the updater into a write primitive — after verification,
+/// the pipeline atomically drops `0o755` bytes at whatever path
+/// was supplied.
+pub(crate) fn download_and_apply_to<F>(
     info: &UpdateInfo,
     binary_path: &std::path::Path,
     http_get: F,

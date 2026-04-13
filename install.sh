@@ -72,20 +72,41 @@ pick_bin_dir() {
 }
 
 # ─── Resolve tag to download from ────────────────────────
+
+# Validates that a tag name looks like a semver release. Rejects
+# arbitrary characters that could alter the download path or
+# resolve to an unexpected artifact.
+validate_tag() {
+    local tag="$1"
+    case "$tag" in
+        v[0-9]*\.[0-9]*\.[0-9]*) return 0 ;;
+        *)
+            err "refusing unexpected tag name: '$tag'"
+            err "  expected format: vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+            ;;
+    esac
+}
+
 resolve_tag() {
     if [ "$CSQ_VERSION" != "latest" ]; then
+        validate_tag "$CSQ_VERSION"
         echo "$CSQ_VERSION"
         return
     fi
     # The GitHub API returns the latest STABLE release by default.
-    # For pre-releases we fall back to scraping the releases page.
     local tag
     tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
         | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
         | head -1 \
         | sed -E 's/.*"([^"]+)"$/\1/')
     if [ -z "$tag" ]; then
-        # No stable releases yet — fall back to the most recent pre-release
+        # No stable releases yet — csq is in alpha. Fall back to
+        # the most recent pre-release, but warn loudly so the user
+        # understands they're getting an unstable build.
+        warn "no stable release found for ${REPO}"
+        warn "falling back to the latest PRE-RELEASE (alpha/beta/rc)"
+        warn "pin with CSQ_VERSION=vX.Y.Z to install a specific version"
         tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
             | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
             | head -1 \
@@ -93,8 +114,10 @@ resolve_tag() {
     fi
     if [ -z "$tag" ]; then
         err "could not resolve latest csq version from GitHub API"
+        err "  set CSQ_VERSION=vX.Y.Z to install a specific version"
         exit 1
     fi
+    validate_tag "$tag"
     echo "$tag"
 }
 
@@ -125,10 +148,25 @@ main() {
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
 
+    # Distinguish "tag does not exist" from "asset not in this
+    # release" so the user gets an actionable error. We resolved
+    # `tag` above; check the tag's release page first.
+    info "Verifying tag ${tag} exists..."
+    local tag_status
+    tag_status=$(curl -fsI -o /dev/null -w "%{http_code}" \
+        "https://api.github.com/repos/${REPO}/releases/tags/${tag}" 2>/dev/null || echo "000")
+    if [ "$tag_status" = "404" ]; then
+        err "tag ${tag} not found in ${REPO}"
+        err "  list releases:   https://github.com/${REPO}/releases"
+        err "  build from source: https://github.com/${REPO}#cli--from-source"
+        exit 1
+    fi
+
     info "Downloading ${artifact}..."
     if ! curl -fsSL -o "$tmp/$artifact" "$url"; then
-        err "download failed: $url"
-        err "  (does the release have an artifact for your platform?)"
+        err "no ${artifact} asset in release ${tag}"
+        err "  your platform may not be published for this version"
+        err "  build from source: https://github.com/${REPO}#cli--from-source"
         exit 1
     fi
 
@@ -142,7 +180,9 @@ main() {
         fi
 
         local expected actual
-        expected=$(grep " ${artifact}\$" "$tmp/SHA256SUMS" | awk '{print $1}')
+        # Use awk field-match instead of grep substring to avoid
+        # false matches on filenames that share a suffix.
+        expected=$(awk -v a="$artifact" '$2 == a {print $1}' "$tmp/SHA256SUMS")
         if [ -z "$expected" ]; then
             err "SHA256SUMS does not contain an entry for ${artifact}"
             exit 1

@@ -252,7 +252,7 @@ mod tests {
     /// Builds a fake GitHub Releases JSON response with the given
     /// version and a download URL for the current platform.
     fn fake_release_json(version: &str) -> Vec<u8> {
-        let (platform_tag, filename) = current_platform_asset();
+        let filename = current_platform_asset().1;
         format!(
             r#"{{
   "tag_name": "v{version}",
@@ -268,19 +268,7 @@ mod tests {
             filename = filename,
         )
         .into_bytes()
-        .tap_mut(|_| {
-            // avoid unused_variables on platform_tag
-            let _ = platform_tag;
-        })
     }
-
-    /// Dummy extension trait so the closure above compiles.
-    trait TapMut: Sized {
-        fn tap_mut(self, _: impl FnOnce(&mut Self)) -> Self {
-            self
-        }
-    }
-    impl<T> TapMut for T {}
 
     /// Returns a (platform tag, asset filename) pair matching what
     /// `github::check_latest_version` looks for on the current host.

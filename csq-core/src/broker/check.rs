@@ -23,7 +23,14 @@ pub enum BrokerResult {
     /// Token was refreshed successfully.
     Refreshed,
     /// Another process is already refreshing (lock contention).
+    /// The caller should NOT set a cooldown — the lock holder is
+    /// doing the work and we'll pick up the result on the next tick.
     Skipped,
+    /// Anthropic returned a rate-limit error (429 / `rate_limit_error`)
+    /// for the primary refresh. Sibling recovery was suppressed to
+    /// avoid further hammering the throttled endpoint. The caller
+    /// MUST set a cooldown so the next tick does not retry immediately.
+    RateLimited,
     /// Refresh failed but recovery succeeded.
     Recovered,
     /// Total failure — LOGIN-NEEDED.
@@ -98,19 +105,18 @@ where
             // On rate-limit errors, do NOT try siblings — that
             // would fire another HTTP request against the same
             // throttled endpoint, making the condition worse.
-            // Instead, return a Skipped result so the refresher
-            // sets its normal cooldown and we retry on the next
-            // tick when the rate-limit window has likely elapsed.
+            // Return `RateLimited` so the refresher distinguishes
+            // this from the "another process holds the lock"
+            // Skipped variant and applies a cooldown. Preserving
+            // the existing broker_failed flag state is correct:
+            // being throttled is not a re-login condition.
             if is_rate_limited(&primary_err) {
                 warn!(
                     account = %account,
                     "primary refresh hit rate limit, skipping sibling recovery"
                 );
                 drop(guard);
-                // Preserve the existing broker_failed flag state.
-                // Do NOT set a broker_failed marker — the user
-                // isn't locked out, we're just throttled.
-                return Ok(BrokerResult::Skipped);
+                return Ok(BrokerResult::RateLimited);
             }
             // Primary refresh failed — attempt recovery from live siblings
             info!(account = %account, "primary refresh failed, attempting recovery");
