@@ -102,12 +102,36 @@ pub fn handle(
 
     #[cfg(not(unix))]
     {
-        let status = cmd.status();
+        // Non-Unix (Windows): spawn CC as a child and record its
+        // PID in `.live-cc-pid` so the daemon sweep can tell CC
+        // apart from csq-cli. On Unix `exec` replaces csq-cli with
+        // claude and the csq PID becomes claude's PID, so there is
+        // only one PID and this marker is not needed.
+        //
+        // If csq-cli panics or is killed between `spawn` and
+        // `wait`, the handle dir survives and the sweep needs to
+        // know the child's PID to avoid deleting it out from under
+        // a running CC. We write the marker immediately after
+        // spawn — the write happens before any other work so the
+        // TOCTOU window is a handful of syscalls wide.
+        use csq_core::accounts::markers;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&handle_dir);
+                return Err(anyhow!("failed to launch claude: {e}"));
+            }
+        };
+        let child_pid = child.id();
+        if let Err(e) = markers::write_live_cc_pid(&handle_dir_abs, child_pid) {
+            eprintln!("warning: could not record CC child PID: {e}");
+        }
+        let status = child.wait();
         let _ = std::fs::remove_dir_all(&handle_dir);
         match status {
             Ok(s) if !s.success() => std::process::exit(s.code().unwrap_or(1)),
             Ok(_) => Ok(()),
-            Err(e) => Err(anyhow!("failed to launch claude: {e}")),
+            Err(e) => Err(anyhow!("failed to wait for claude: {e}")),
         }
     }
 }

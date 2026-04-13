@@ -522,9 +522,14 @@ mod tests {
     }
 
     /// Mock HttpGetFn that returns a MiniMax-like quota response.
+    /// Timestamps use 2100-01-01 in ms for consistency with the
+    /// other mocks (see mock_zai_get). Currently inert because
+    /// `tick_3p_no_accounts_does_nothing` installs no accounts, but
+    /// kept in sync so a future test reusing this fixture doesn't
+    /// silently time-bomb.
     fn mock_get_noop() -> HttpGetFn {
         Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
-            Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#.to_vec()))
+            Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":4102444800000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":4102444800000}]}"#.to_vec()))
         })
     }
 
@@ -599,20 +604,29 @@ mod tests {
         )
     }
 
+    // nextResetTime values are intentionally far in the future (2100-01-01
+    // in ms) so `clear_expired` on load does not null them out as real time
+    // advances. Pinning to plausible "today + few hours" dates turns these
+    // tests into time-bombs that silently start failing once the clock
+    // passes the hardcoded reset.
     fn mock_zai_get() -> HttpGetFn {
         Arc::new(|_url: &str, _token: &str, _headers: &[(&str, &str)]| {
-            Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":1776025018977},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":1776389633997}],"level":"max"}}"#.to_vec()))
+            Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":4102444800000},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":4102444800000}],"level":"max"}}"#.to_vec()))
         })
     }
 
     fn mock_get_combined() -> HttpGetFn {
         Arc::new(|url: &str, _token: &str, _headers: &[(&str, &str)]| {
             if url.contains("z.ai") {
-                // Z.AI quota response
-                Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":1776025018977},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":1776389633997}],"level":"max"}}"#.to_vec()))
+                // Z.AI quota response — far-future reset times (see mock_zai_get)
+                Ok((200, br#"{"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":6,"nextResetTime":4102444800000},{"type":"TOKENS_LIMIT","unit":6,"percentage":11,"nextResetTime":4102444800000}],"level":"max"}}"#.to_vec()))
             } else {
-                // MiniMax quota response
-                Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":1776024000000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":1776038400000}]}"#.to_vec()))
+                // MiniMax quota response — end_time/weekly_end_time
+                // bumped to 2100-01-01 so `quota::clear_expired` never
+                // nulls the windows as real time passes. Older literals
+                // (1776*) bit the test suite in 2026-04 when real time
+                // drifted past them — see journal 0036.
+                Ok((200, br#"{"model_remains":[{"model_name":"MiniMax-M2","current_interval_total_count":1000,"current_interval_usage_count":800,"end_time":4102444800000,"current_weekly_total_count":7000,"current_weekly_usage_count":6000,"weekly_end_time":4102444800000}]}"#.to_vec()))
             }
         })
     }

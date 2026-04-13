@@ -37,9 +37,34 @@ pub fn write_current_account(
     write_account_marker(&path, account)
 }
 
-/// Reads the `.live-pid` file. Returns None if missing or invalid.
+/// Reads the `.live-pid` file. Returns None if missing, invalid,
+/// or if the path is a symlink. Refusing symlinks closes a
+/// cross-handle PID forgery vector where a poisoned handle dir
+/// could point `.live-pid` at another process's status file and
+/// trick the daemon's sweep into treating a dead handle as live.
 pub fn read_live_pid(config_dir: &Path) -> Option<u32> {
-    let path = config_dir.join(".live-pid");
+    read_pid_marker(config_dir, ".live-pid")
+}
+
+/// Reads the `.live-cc-pid` file, used on non-Unix platforms to
+/// record the spawned CC child process PID. On Unix this file is
+/// never written (exec replaces csq-cli with claude so there is a
+/// single PID). The sweep treats the handle dir as live if EITHER
+/// `.live-pid` or `.live-cc-pid` is alive, closing the Windows
+/// crash-recovery window where csq-cli died but CC survived as an
+/// orphaned child.
+pub fn read_live_cc_pid(config_dir: &Path) -> Option<u32> {
+    read_pid_marker(config_dir, ".live-cc-pid")
+}
+
+fn read_pid_marker(config_dir: &Path, name: &str) -> Option<u32> {
+    let path = config_dir.join(name);
+    // symlink_metadata does NOT follow symlinks; if the path is a
+    // symlink we refuse rather than read through it.
+    match path.symlink_metadata() {
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => return None,
+    }
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -47,7 +72,17 @@ pub fn read_live_pid(config_dir: &Path) -> Option<u32> {
 
 /// Writes the `.live-pid` file.
 pub fn write_live_pid(config_dir: &Path, pid: u32) -> Result<(), CredentialError> {
-    let path = config_dir.join(".live-pid");
+    write_pid_marker(config_dir, ".live-pid", pid)
+}
+
+/// Writes the `.live-cc-pid` file. Only used on non-Unix — see
+/// [`read_live_cc_pid`] for the rationale.
+pub fn write_live_cc_pid(config_dir: &Path, pid: u32) -> Result<(), CredentialError> {
+    write_pid_marker(config_dir, ".live-cc-pid", pid)
+}
+
+fn write_pid_marker(config_dir: &Path, name: &str, pid: u32) -> Result<(), CredentialError> {
+    let path = config_dir.join(name);
     let tmp = crate::platform::fs::unique_tmp_path(&path);
     std::fs::write(&tmp, pid.to_string().as_bytes()).map_err(|e| CredentialError::Io {
         path: tmp.clone(),

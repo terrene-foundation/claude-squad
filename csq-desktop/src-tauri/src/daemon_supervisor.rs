@@ -333,7 +333,25 @@ async fn run_daemon(
         shutdown.clone(),
     );
     let auto_rotator = daemon::spawn_auto_rotate(base_dir.to_path_buf(), shutdown.clone());
-    let sweep = csq_core::session::spawn_sweep(base_dir.to_path_buf(), shutdown.clone());
+    // Sweep preserves each dead handle dir's image-cache into
+    // ~/.claude/image-cache/ before removing the orphan. If we
+    // cannot resolve ~/.claude (no $HOME in a sandboxed env), pass
+    // `None` so the sweep still runs but skips preservation —
+    // better to lose images than route them into a fallback path
+    // like base_dir/image-cache/ that CC will never find.
+    let claude_home_for_sweep = dirs::home_dir().map(|h| h.join(".claude"));
+    let sweep = csq_core::session::spawn_sweep(
+        base_dir.to_path_buf(),
+        claude_home_for_sweep,
+        shutdown.clone(),
+    );
+
+    // Background update check — same 24-hour-cached behavior as the
+    // CLI. Fires a detached OS thread on daemon start so desktop
+    // users see the "csq vX.Y.Z available" notice on app launch.
+    // Without this, the CLI emits notices on every command but the
+    // desktop app silently misses every release.
+    csq_core::update::auto_update_bg(base_dir.to_path_buf());
 
     // Block until cancellation fires from the app lifecycle.
     outer_cancel.cancelled().await;
