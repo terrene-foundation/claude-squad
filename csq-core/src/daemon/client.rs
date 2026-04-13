@@ -181,6 +181,29 @@ pub fn http_post_unix(
     sock_path: &Path,
     path_and_query: &str,
 ) -> Result<DaemonResponse, DaemonClientError> {
+    http_post_unix_impl(sock_path, path_and_query, None)
+}
+
+/// Issues a `POST path_and_query` with a JSON body against the
+/// daemon's Unix socket. Used by `csq login` to submit the paste-
+/// code exchange request to `/api/oauth/exchange`.
+///
+/// The caller is responsible for building the JSON string; this
+/// function only wraps it in the HTTP request and sets the
+/// `Content-Type: application/json` header.
+pub fn http_post_unix_json(
+    sock_path: &Path,
+    path_and_query: &str,
+    json_body: &str,
+) -> Result<DaemonResponse, DaemonClientError> {
+    http_post_unix_impl(sock_path, path_and_query, Some(json_body))
+}
+
+fn http_post_unix_impl(
+    sock_path: &Path,
+    path_and_query: &str,
+    json_body: Option<&str>,
+) -> Result<DaemonResponse, DaemonClientError> {
     validate_path_and_query(path_and_query)?;
 
     let mut stream = UnixStream::connect(sock_path).map_err(DaemonClientError::Connect)?;
@@ -191,13 +214,25 @@ pub fn http_post_unix(
         .set_write_timeout(Some(DEFAULT_TIMEOUT))
         .map_err(DaemonClientError::Io)?;
 
-    let request = format!(
-        "POST {path_and_query} HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Content-Length: 0\r\n\
-         Connection: close\r\n\
-         \r\n"
-    );
+    let request = match json_body {
+        Some(body) => format!(
+            "POST {path_and_query} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {len}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            len = body.len(),
+        ),
+        None => format!(
+            "POST {path_and_query} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Length: 0\r\n\
+             Connection: close\r\n\
+             \r\n"
+        ),
+    };
     stream
         .write_all(request.as_bytes())
         .map_err(DaemonClientError::Io)?;

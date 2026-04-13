@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import { homeDir, join } from '@tauri-apps/api/path';
 
   // ── Props ─────────────────────────────────────────────────
@@ -24,21 +25,38 @@
     default_model: string;
   }
 
+  interface ClaudeLoginView {
+    auth_url: string;
+    state: string;
+    account: number;
+    expires_in_secs: number;
+  }
+
   // ── Local state ───────────────────────────────────────────
   //
-  // Login flow for Anthropic accounts (claude auth login):
-  //   1. `picker`       — user picks a provider
-  //   2. `authenticating` — claude auth login running (browser opens automatically)
-  //   3. `success`      — account added
-  //   4. `error`        — something failed; user can retry
+  // Claude OAuth paste-code flow (Anthropic no longer supports
+  // loopback redirect for this client_id — the user has to copy
+  // the authorization code from Anthropic's callback page and
+  // paste it back into the app):
+  //   1. `picker`        — user picks a provider
+  //   2. `paste-code`    — browser is open, user pastes the code
+  //   3. `exchanging`    — submitting code to Anthropic
+  //   4. `success`       — account added
+  //   5. `error`         — something failed; user can retry
   //
   // Bearer-key flow (MiniMax, Z.AI):
-  //   1. `picker`       — user picks a provider
-  //   2. `bearer-form`  — user pastes an API key
+  //   1. `picker`        — user picks a provider
+  //   2. `bearer-form`   — user pastes an API key
   //   3. `success` / `error`
   type Step =
     | { kind: 'picker' }
-    | { kind: 'authenticating'; account: number }
+    | {
+        kind: 'paste-code';
+        login: ClaudeLoginView;
+        code: string;
+        error: string | null;
+      }
+    | { kind: 'exchanging'; account: number }
     | {
         kind: 'bearer-form';
         provider: ProviderView;
@@ -100,18 +118,54 @@
     }
   }
 
-  // ── Claude OAuth (delegates to `claude auth login`) ────────
+  // ── Claude OAuth (in-process paste-code flow) ─────────────
   //
-  // `claude auth login` handles the full browser flow: opens the
-  // browser, starts a local callback server, catches the redirect,
-  // and exchanges the code for tokens. Zero manual steps.
+  // Anthropic's current OAuth flow for this client_id uses a
+  // paste-code redirect: the authorize URL has
+  // `redirect_uri=https://platform.claude.com/oauth/code/callback`,
+  // the hosted page shows the user an authorization code, the
+  // user pastes it back into csq, and the backend exchanges it
+  // for tokens.
+  //
+  // The previous `start_claude_login` command shelled out to
+  // `claude auth login`, which fails in GUI context because
+  // Finder-launched apps don't inherit the user's shell PATH.
+  // The new flow uses `begin_claude_login` + `submit_oauth_code`
+  // entirely in-process.
   async function startClaudeOAuth() {
-    step = { kind: 'authenticating', account: nextAccountId };
+    try {
+      const login = await invoke<ClaudeLoginView>('begin_claude_login', {
+        account: nextAccountId,
+      });
+      // Open the authorize URL in the user's default browser.
+      await openUrl(login.auth_url);
+      step = {
+        kind: 'paste-code',
+        login,
+        code: '',
+        error: null,
+      };
+    } catch (e) {
+      step = { kind: 'error', message: String(e) };
+    }
+  }
+
+  async function submitOAuthCode() {
+    if (step.kind !== 'paste-code') return;
+    const current = step;
+    const code = current.code.trim();
+    if (!code) {
+      step = { ...current, error: 'Authorization code must not be empty' };
+      return;
+    }
+
+    step = { kind: 'exchanging', account: current.login.account };
     try {
       const baseDir = await getBaseDir();
-      const account = await invoke<number>('start_claude_login', {
+      const account = await invoke<number>('submit_oauth_code', {
         baseDir,
-        account: nextAccountId,
+        stateToken: current.login.state,
+        code,
       });
       onAccountAdded();
       step = {
@@ -119,8 +173,25 @@
         message: `Account ${account} added successfully.`,
       };
     } catch (e) {
-      step = { kind: 'error', message: String(e) };
+      step = {
+        kind: 'paste-code',
+        login: current.login,
+        code: current.code,
+        error: String(e),
+      };
     }
+  }
+
+  async function cancelPasteCode() {
+    if (step.kind === 'paste-code') {
+      // Best-effort: consume the pending state so it doesn't linger.
+      try {
+        await invoke('cancel_login', { stateToken: step.login.state });
+      } catch (_) {
+        // Silently ignore — the server will expire the state TTL anyway.
+      }
+    }
+    step = { kind: 'picker' };
   }
 
   // ── Bearer key flow ───────────────────────────────────────
@@ -199,14 +270,50 @@
               </button>
             {/each}
           </div>
-        {:else if step.kind === 'authenticating'}
+        {:else if step.kind === 'paste-code'}
           <p class="lede">
-            Signing in to account #{step.account}…
+            Signing in to account #{step.login.account}…
           </p>
           <p class="hint">
-            A browser window should open automatically. Complete the sign-in
-            there and this dialog will update when authentication finishes.
+            A browser window should open to Anthropic. Sign in, then
+            copy the authorization code from the callback page and
+            paste it below.
           </p>
+          <p class="hint">
+            If the browser didn't open, <a
+              href={step.login.auth_url}
+              target="_blank"
+              rel="noopener noreferrer">open the sign-in URL manually</a
+            >.
+          </p>
+          <label class="field">
+            <span>Authorization code</span>
+            <input
+              type="text"
+              bind:value={step.code}
+              placeholder="Paste the code from Anthropic's page"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          {#if step.error}
+            <div class="error-banner">{step.error}</div>
+          {/if}
+          <div class="actions">
+            <button class="secondary" onclick={cancelPasteCode}>Cancel</button>
+            <button
+              class="primary"
+              onclick={submitOAuthCode}
+              disabled={!step.code.trim()}
+            >
+              Complete sign-in
+            </button>
+          </div>
+        {:else if step.kind === 'exchanging'}
+          <p class="lede">
+            Exchanging the code for account #{step.account}…
+          </p>
+          <p class="hint">Talking to Anthropic. This usually takes a second.</p>
         {:else if step.kind === 'bearer-form'}
           <p class="lede">Paste your {step.provider.name} API key.</p>
           <label class="field">

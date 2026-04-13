@@ -1,167 +1,175 @@
 //! `csq login <N>` — OAuth login flow for a new account.
 //!
-//! # Two execution paths
+//! # Path selection (revised in v2.0.0-alpha.5)
 //!
-//! 1. **Daemon-delegated (preferred on Unix)** — when a healthy
-//!    daemon is running, the CLI asks it to start a PKCE login via
-//!    `GET /api/login/{N}`, opens the returned authorize URL in a
-//!    browser, and polls `{base_dir}/credentials/{N}.json` until
-//!    the daemon's `/oauth/callback` handler writes it. This path
-//!    is the one Claude Code itself uses internally and produces
-//!    byte-identical credentials — no shell-out, no `claude`
-//!    binary dependency.
+//! Previous versions tried a daemon-delegated path first that
+//! assumed the daemon would catch a loopback OAuth redirect. That
+//! was true under the v1.x loopback design, but journal 0020
+//! retired loopback and nothing replaced the "daemon completes the
+//! exchange" step — the CLI would open the browser and then poll
+//! `credentials/{N}.json` for five minutes while nothing ever
+//! wrote it.
 //!
-//! 2. **Direct shell-out (fallback)** — if no daemon is running,
-//!    the port 8420 callback listener is unavailable, or the user
-//!    has not yet started the daemon, we fall back to the legacy
-//!    path: spawn `claude auth login` with an isolated
-//!    `CLAUDE_CONFIG_DIR`, then capture the credentials from the
-//!    keychain or `.credentials.json` file.
+//! The current priority is:
+//!
+//! 1. **Delegate to `claude auth login`** (preferred) — if the
+//!    `claude` binary is on `PATH`, spawn it with an isolated
+//!    `CLAUDE_CONFIG_DIR=config-{N}/`. CC has its own
+//!    seamless flow (browser opens, hosted callback page bridges
+//!    the code back to a local listener CC owns). csq imports the
+//!    credentials from the isolated dir when CC exits. **This is
+//!    the same UX as running `claude auth login` yourself.**
+//!
+//! 2. **Paste-code via the daemon** (fallback) — if `claude` is
+//!    not on `PATH` or its process fails, and a healthy daemon is
+//!    available, ask the daemon to `GET /api/login/{N}` for an
+//!    authorize URL, open the browser, prompt on stdin for the
+//!    authorization code from Anthropic's hosted callback page,
+//!    and `POST /api/oauth/exchange` with the code. The daemon
+//!    writes `credentials/{N}.json` on successful exchange.
 //!
 //! Both paths finish by updating `profiles.json` (email label),
 //! writing the `.csq-account` marker, and clearing any
-//! `broker_failed` sentinel. These finalization steps are owned by
-//! the CLI, not the daemon, so the discovery cache picks up the
-//! account on the next poll regardless of which path ran.
+//! `broker_failed` sentinel.
 
 use anyhow::{anyhow, Context, Result};
 use csq_core::accounts::{markers, profiles};
 use csq_core::broker::fanout;
 use csq_core::credentials::{self, file, keychain};
 use csq_core::types::AccountNum;
+use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use csq_core::daemon::{self, DaemonClientError, DetectResult};
 
-/// How often the CLI polls the canonical credential file while
-/// waiting for the daemon's callback handler to write it.
-#[cfg(unix)]
-const POLL_INTERVAL: Duration = Duration::from_millis(750);
-
-/// Cap on the total daemon-path wait time. The daemon's state store
-/// has its own TTL ([`csq_core::oauth::STATE_TTL`], currently 5
-/// minutes), but we also bound the CLI wait so a user who walked
-/// away from their browser still gets a clear error instead of an
-/// indefinite spinner. 5 minutes matches the state TTL.
-#[cfg(unix)]
-const DAEMON_WAIT_CAP: Duration = Duration::from_secs(300);
-
-/// Entry point invoked from `main.rs`. Tries the daemon-delegated
-/// path first (Unix only), falling back to `claude auth login` when
-/// the daemon is not running or not reachable.
+/// Entry point invoked from `main.rs`. Prefers the shell-out to
+/// `claude auth login` (same UX as running CC directly); falls back
+/// to the daemon paste-code path when `claude` is unavailable.
 pub fn handle(base_dir: &Path, account: AccountNum) -> Result<()> {
-    #[cfg(unix)]
-    match try_daemon_path(base_dir, account) {
-        DaemonPathOutcome::Succeeded => return Ok(()),
-        DaemonPathOutcome::Fallback(reason) => {
-            eprintln!("note: {reason}; falling back to direct login");
-        }
-        DaemonPathOutcome::Failed(e) => return Err(e),
+    if which_claude().is_some() {
+        return handle_direct(base_dir, account);
     }
-    handle_direct(base_dir, account)
+
+    #[cfg(unix)]
+    {
+        eprintln!(
+            "note: `claude` binary not found on PATH — falling back to daemon paste-code flow"
+        );
+        handle_paste_code(base_dir, account)
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(anyhow!(
+            "`claude` binary not found on PATH — install Claude Code and re-run `csq login {account}`"
+        ))
+    }
 }
 
-/// Outcome of attempting the daemon-delegated login path.
-#[cfg(unix)]
-enum DaemonPathOutcome {
-    /// Login completed via the daemon path; nothing more to do.
-    Succeeded,
-    /// Daemon is not available or returned 503; caller should fall
-    /// back to the direct path. The string is a one-line reason
-    /// for the fallback note printed to stderr.
-    Fallback(String),
-    /// The daemon path reached an unrecoverable failure; propagate
-    /// the error to the user instead of silently falling back.
-    /// Example: user denied consent, or the exchange failed.
-    Failed(anyhow::Error),
+/// Returns `Some(path)` if `claude` is on `PATH`, `None` otherwise.
+/// Stdlib-only PATH walk — no `which` crate dependency.
+fn which_claude() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("claude");
+        if let Ok(meta) = candidate.metadata() {
+            if meta.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if meta.permissions().mode() & 0o111 != 0 {
+                        return Some(candidate);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+        // Windows: also try `claude.exe`
+        #[cfg(windows)]
+        {
+            let candidate_exe = dir.join("claude.exe");
+            if candidate_exe.is_file() {
+                return Some(candidate_exe);
+            }
+        }
+    }
+    None
 }
 
-/// Attempts the daemon-delegated login path.
+/// Paste-code login path via the csq daemon.
 ///
-/// Does NOT call `Command::new("claude")` — the daemon owns the
-/// OAuth flow end-to-end. On success the CLI only performs the
-/// finalization steps (profile update, marker, broker-failed
-/// clear).
+/// Only used when `claude` is not on `PATH`. Steps:
+///
+/// 1. Detect the healthy daemon; require `DetectResult::Healthy`.
+/// 2. `GET /api/login/{N}` — daemon mints a PKCE state and returns
+///    the Anthropic authorize URL + state token.
+/// 3. Open the URL in the user's browser.
+/// 4. Prompt on stdin for the authorization code shown on
+///    Anthropic's hosted callback page.
+/// 5. `POST /api/oauth/exchange` with `{state, code}` — daemon
+///    runs the token exchange and writes `credentials/{N}.json`.
+/// 6. Finalize (profile update, marker, broker-failed clear).
 #[cfg(unix)]
-fn try_daemon_path(base_dir: &Path, account: AccountNum) -> DaemonPathOutcome {
-    // Step 1: detect the daemon. Any result other than Healthy
-    // triggers a fallback with a descriptive reason.
+fn handle_paste_code(base_dir: &Path, account: AccountNum) -> Result<()> {
+    // Step 1: detect the daemon.
     let socket_path = match daemon::detect_daemon(base_dir) {
         DetectResult::Healthy { socket_path, .. } => socket_path,
         DetectResult::NotRunning => {
-            return DaemonPathOutcome::Fallback("csq daemon is not running".to_string());
+            return Err(anyhow!(
+                "csq daemon is not running — start it with `csq daemon start` \
+                 or install the desktop app so the daemon runs in the background"
+            ));
         }
         DetectResult::Stale { reason } => {
-            return DaemonPathOutcome::Fallback(format!("csq daemon is stale: {reason}"));
+            return Err(anyhow!("csq daemon is stale: {reason}"));
         }
         DetectResult::Unhealthy { reason } => {
-            return DaemonPathOutcome::Fallback(format!("csq daemon is unhealthy: {reason}"));
+            return Err(anyhow!("csq daemon is unhealthy: {reason}"));
         }
     };
 
-    // Step 2: ask the daemon to start an OAuth login. The daemon
-    // generates the PKCE pair, stores the state token, and returns
-    // the Anthropic authorize URL. A 503 here means the OAuth
-    // callback listener is down (port 8420 in use) — the daemon is
-    // otherwise healthy, so we can cleanly fall back.
+    // Step 2: ask the daemon to start an OAuth login.
     let path_and_query = format!("/api/login/{}", account.get());
-    let resp = match daemon::http_get_unix(&socket_path, &path_and_query) {
-        Ok(r) => r,
-        Err(DaemonClientError::Connect(_)) => {
-            return DaemonPathOutcome::Fallback("lost connection to daemon socket".to_string());
-        }
-        Err(e) => {
-            return DaemonPathOutcome::Failed(anyhow!("daemon login call failed: {e}"));
-        }
-    };
+    let resp = daemon::http_get_unix(&socket_path, &path_and_query)
+        .map_err(|e: DaemonClientError| anyhow!("daemon login call failed: {e}"))?;
 
     match resp.status {
         200 => {}
         400 => {
-            return DaemonPathOutcome::Failed(anyhow!(
+            return Err(anyhow!(
                 "daemon rejected account {}: {}",
                 account,
                 resp.body.trim()
             ));
         }
         503 => {
-            return DaemonPathOutcome::Fallback(
-                "daemon OAuth callback listener is not available (port 8420 in use?)".to_string(),
-            );
+            return Err(anyhow!(
+                "daemon was started without OAuth support — login unavailable"
+            ));
         }
         other => {
-            return DaemonPathOutcome::Failed(anyhow!(
-                "daemon returned HTTP {} on /api/login/{}: {}",
-                other,
+            return Err(anyhow!(
+                "daemon returned HTTP {other} on /api/login/{}: {}",
                 account,
                 resp.body.trim()
             ));
         }
     }
 
-    // Step 3: parse the daemon's LoginRequest JSON. Only the
-    // `auth_url` is strictly required; the other fields are
-    // informational for the CLI.
-    let login = match parse_login_response(&resp.body) {
-        Ok(v) => v,
-        Err(e) => {
-            return DaemonPathOutcome::Failed(anyhow!(
-                "could not parse daemon /api/login response: {e}"
-            ));
-        }
-    };
+    let login = parse_login_response(&resp.body)
+        .with_context(|| "could not parse daemon /api/login response")?;
 
-    // Step 4: open the authorize URL in the user's browser.
+    // Step 3: open the authorize URL.
     println!(
-        "Starting OAuth login for account {} via csq daemon...",
+        "Starting OAuth login for account {} (paste-code flow)...",
         account
     );
-    println!("Opening your browser to complete authorization.");
-    println!();
-    println!("If the browser does not open, paste this URL manually:");
+    println!("Opening your browser to:");
     println!("  {}", login.auth_url);
     println!();
 
@@ -170,52 +178,77 @@ fn try_daemon_path(base_dir: &Path, account: AccountNum) -> DaemonPathOutcome {
         eprintln!("         open the URL above by hand to continue.");
     }
 
-    // Step 5: poll the canonical credential file until the daemon
-    // writes it, or the wait cap elapses. Polling the filesystem
-    // directly avoids the `/api/accounts` discovery cache (5s TTL)
-    // and keeps the CLI responsive.
-    let canonical = file::canonical_path(base_dir, account);
-    let deadline = Instant::now() + DAEMON_WAIT_CAP;
-    println!("Waiting for the daemon to complete the exchange...");
+    // Step 4: prompt for the authorization code.
+    println!("After authorizing, Anthropic's page will display a code.");
+    print!("Paste the authorization code here: ");
+    std::io::stdout()
+        .flush()
+        .context("failed to flush stdout before paste-code prompt")?;
 
-    loop {
-        if canonical.exists() {
-            // Verify the file is a well-formed credential file
-            // before declaring victory — a half-written file is
-            // unlikely given `atomic_replace`, but defensive.
-            if credentials::load(&canonical).is_ok() {
-                break;
-            }
-        }
-        if Instant::now() >= deadline {
-            return DaemonPathOutcome::Failed(anyhow!(
-                "timed out waiting {} seconds for daemon to complete login — \
-                 the browser flow may have been cancelled or the state token expired",
-                DAEMON_WAIT_CAP.as_secs()
+    let mut line = String::new();
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    handle
+        .read_line(&mut line)
+        .context("failed to read authorization code from stdin")?;
+    let code = line.trim().trim_end_matches('\r').trim().to_string();
+    if code.is_empty() {
+        return Err(anyhow!("paste was empty; login cancelled"));
+    }
+
+    // Step 5: POST /api/oauth/exchange with {state, code}.
+    let exchange_body = serde_json::json!({
+        "state": login.state,
+        "code": code,
+    });
+    let exchange_body_str = serde_json::to_string(&exchange_body)
+        .context("failed to serialize /api/oauth/exchange request body")?;
+
+    let exchange_resp =
+        daemon::http_post_unix_json(&socket_path, "/api/oauth/exchange", &exchange_body_str)
+            .map_err(|e: DaemonClientError| anyhow!("daemon exchange call failed: {e}"))?;
+
+    match exchange_resp.status {
+        200 => {}
+        400 => {
+            return Err(anyhow!(
+                "daemon rejected exchange: {}",
+                exchange_resp.body.trim()
             ));
         }
-        std::thread::sleep(POLL_INTERVAL);
+        502 => {
+            return Err(anyhow!(
+                "Anthropic rejected the authorization code: {}",
+                exchange_resp.body.trim()
+            ));
+        }
+        503 => {
+            return Err(anyhow!(
+                "daemon was started without OAuth support — exchange unavailable"
+            ));
+        }
+        other => {
+            return Err(anyhow!(
+                "daemon returned HTTP {other} on /api/oauth/exchange: {}",
+                exchange_resp.body.trim()
+            ));
+        }
     }
 
-    // Step 6: finalize. The daemon wrote credentials/N.json and
-    // config-N/.credentials.json but left profile/markers to the
-    // CLI, because the daemon never runs `claude auth status` and
-    // should not depend on the `claude` binary.
-    if let Err(e) = finalize(base_dir, account) {
-        return DaemonPathOutcome::Failed(e.context("post-login finalization failed"));
-    }
-
-    DaemonPathOutcome::Succeeded
+    // Step 6: finalize.
+    println!("Credentials written for account {}.", account);
+    finalize(base_dir, account).context("post-login finalization failed")
 }
 
 /// Subset of the daemon's `LoginRequest` JSON we need.
 ///
 /// Defined locally so the CLI is not coupled to the full struct's
-/// layout — only `auth_url` is load-bearing.
+/// layout — `auth_url` + `state` are the load-bearing fields.
 #[cfg(unix)]
 #[derive(Debug)]
 struct DaemonLoginRequest {
     auth_url: String,
+    state: String,
 }
 
 #[cfg(unix)]
@@ -230,7 +263,15 @@ fn parse_login_response(body: &str) -> Result<DaemonLoginRequest> {
     if auth_url.is_empty() {
         return Err(anyhow!("response 'auth_url' is empty"));
     }
-    Ok(DaemonLoginRequest { auth_url })
+    let state = json
+        .get("state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("response is missing 'state' field"))?
+        .to_string();
+    if state.is_empty() {
+        return Err(anyhow!("response 'state' is empty"));
+    }
+    Ok(DaemonLoginRequest { auth_url, state })
 }
 
 /// Spawns the platform-appropriate "open a URL in the default
